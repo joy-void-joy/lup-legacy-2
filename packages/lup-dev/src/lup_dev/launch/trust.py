@@ -2382,7 +2382,8 @@ class Trust(Model, arbitrary_types_allowed=True):
         stands in for one that can't, and the answer says so. A repository it
         lets its sessions spawn in is found on the host as a launch finds the
         repositories it relates (`related`): its path from the directory
-        holding this one's main worktree, or absolute.
+        holding this one's main worktree, read from its git directory, or
+        absolute.
         """
         before = Branches() if now is None else now.branches
         try:
@@ -2395,7 +2396,13 @@ class Trust(Model, arbitrary_types_allowed=True):
                 resolved = resolve(declared.project)
                 after = resolved.branches
                 declaration = Declaration.of(declared.project, declared.source)
-                holding = self.git().main_worktree().parent
+                # Not from git's list of worktrees, which follows a `commondir`
+                # a room can plant where trust runs unpinned: from the git
+                # directory approvals are kept by, a clone's `.git` or a bare
+                # repository's own, as its main worktree is.
+                common = self.repository()
+                main = common.parent if common.name == ".git" else common
+                holding = main.parent
                 spawnable = [
                     Spawnable(name=each.name, path=each.on_host(holding))
                     for each in resolved.repositories
