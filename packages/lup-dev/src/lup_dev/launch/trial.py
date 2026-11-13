@@ -36,18 +36,32 @@ would mean:
 9. **hands a concern over:** asked to, the session spawns one with a concern;
    its turn's end reaches the operator, who talks with it directly, and the
    session hears nothing of it;
-10. **ends:** the host ends the session and its room;
-11. **a builder outlives its spawner:** the one handed a concern runs on once
+10. **spawns in another repository,** where the trial is given one
+   (`--into`): asked to, the session spawns a side job there, held in a
+   worktree that repository's own git made in a room of its own, its report
+   reaching the session across repositories, and ending there;
+11. **ends:** the host ends the session and its room;
+12. **a builder outlives its spawner:** the one handed a concern runs on once
    the session ended, until the trial ends it;
-12. **resumes held:** the session resumes held, its conversation kept;
-13. **a terminal takes it over:** a terminal launch resuming it finds it held,
+13. **your reply restarts the builder:** the operator's reply to its turn's end
+   restarts it held, with all it knew, and it answers;
+14. **a side job's worktree goes with its spawner:** the session's side job,
+   whose branch holds nothing of its own, has its worktree removed by the
+   sweep once the launch that spawned it ended;
+15. **a room of the repository's own ends in time:** a command that never ends,
+   run in a room started for it as the host service runs a repository's git
+   where no session's room is there, is ended by podman's own monitor past its
+   limit (`--timeout`), before the service's wait on it runs out;
+16. **resumes held:** the session resumes held, its conversation kept;
+17. **a terminal takes it over:** a terminal launch resuming it finds it held,
    ends it (`--take-over`, asking nothing and answering nothing), and runs a
    turn of its own on it;
-14. **back to held:** held again, it has the terminal's turn in its record.
+18. **back to held:** held again, it has the terminal's turn in its record.
 
 What it doesn't try: the runtime with no held session yet, holds of hours, a
 dashboard's own clicks, a real interactive terminal (its turn runs with `-p`,
-in the terminal's own launch), and a spawn in another repository.
+in the terminal's own launch), and, without `--into`, a spawn in another
+repository.
 """
 
 import asyncio
@@ -69,6 +83,7 @@ from lup_dev.host.held import End, HeldUp, Interrupt
 from lup_dev.host.protocol import Done, HostError, Listed, Register
 from lup_dev.host.service import Program, executed
 from lup_dev.inbox.protocol import (
+    AnswerItem,
     Exchanged,
     FileReport,
     FinishItem,
@@ -130,6 +145,14 @@ class Trial(MutableModel, arbitrary_types_allowed=True):
     inside: Callable[[str, list[str]], TerminalRun]
     """Runs a command in the container named, as one of the room's own
     processes (`Podman.inside`), and returns how it ran."""
+    own_room: Callable[[list[str], timedelta, timedelta], Ran]
+    """Runs a command in a room of the repository's own, as the host service
+    runs a repository's git where no session's room is there (`GitRoom.ran`),
+    ended by podman's monitor past the first limit given, the service's wait on
+    it past the second more, and returns how it ended."""
+    into: str | None = None
+    """Another repository the trial's session spawns a side job in, by the name
+    its declaration gives it (`--into`); none tries no such spawn."""
     forging: str = """
 import json, os, sys
 
@@ -278,6 +301,8 @@ print(len(found))
     """The side job the session spawned, once it's served."""
     builder: Register | None = None
     """The session the trial's session handed a concern, once it's served."""
+    builder_party: Conversation | None = None
+    """The builder's own conversation, as the inbox knows it, once it's heard."""
     spawned: list[Register] = []
     """Each launch the trial's session spawned, whose worktree and branch go
     with the trial's own."""
@@ -369,6 +394,22 @@ print(len(found))
                 ),
                 tried=self.handed_over,
             ),
+            *(
+                []
+                if self.into is None
+                else [
+                    Stage(
+                        name="spawns in another repository",
+                        meaning=(
+                            "a session can't spawn in another repository its "
+                            "approval lets it: what lets it, the worktree that "
+                            "repository's own git makes in a room of its own, or "
+                            "the report's way back across repositories"
+                        ),
+                        tried=self.spawned_elsewhere,
+                    )
+                ]
+            ),
             Stage(
                 name="ends",
                 meaning="a held session's end leaves its room or its launch behind",
@@ -382,6 +423,33 @@ print(len(found))
                     "the operator's to end"
                 ),
                 tried=self.builder_outlived,
+            ),
+            Stage(
+                name="your reply restarts the builder",
+                meaning=(
+                    "the operator's words to a spawned session that ended don't "
+                    "restart it, or it forgot what it knew: a reply to it waits on "
+                    "nobody"
+                ),
+                tried=self.builder_restarted,
+            ),
+            Stage(
+                name="a side job's worktree goes with its spawner",
+                meaning=(
+                    "a side job's worktree with nothing of its own on its branch "
+                    "stays once the launch that spawned it ended: the sweep's tidy, "
+                    "or the room of the repository's own that removes it, is broken"
+                ),
+                tried=self.side_job_tidied,
+            ),
+            Stage(
+                name="a room of the repository's own ends in time",
+                meaning=(
+                    "podman's monitor doesn't end a room the host service starts "
+                    "for a repository's git past its limit (`--timeout`): only the "
+                    "service's own wait on it, and its removal by name, end it"
+                ),
+                tried=self.own_room_stopped,
             ),
             Stage(
                 name="resumes held",
@@ -747,6 +815,7 @@ print(len(found))
         self.spawned = [*self.spawned, builder]
         apart = self.apart(launch, builder)
         party = self.party_of(builder)
+        self.builder_party = party
         self.until(
             lambda: self.said_by(party, "FIG") is not None,
             f"no turn's end of theirs holding FIG reached you within {self.patience}",
@@ -791,6 +860,115 @@ print(len(found))
             raise TrialError(message)
         self.end(builder)
         return "The one handed a concern ran on until the trial ended it."
+
+    def builder_restarted(self) -> str:
+        """Reply to the ended builder's turn's end as the operator does, and see the reply restart it held, answering with what it knew."""
+        builder, party = self.builder, self.builder_party
+        if builder is None or party is None:
+            message = "the session handed no one a concern"
+            raise TrialError(message)
+        ending = self.said_by(party, "DATE")
+        if ending is None:
+            message = "the builder left no turn's end to reply to"
+            raise TrialError(message)
+        reply = self.host.ask(
+            AnswerItem(
+                number=ending.number,
+                comment=(
+                    "Which single word did you first answer with? Answer with that "
+                    "word alone."
+                ),
+            ),
+            Shown,
+        ).item
+        restarted = self.found(
+            lambda: self.resumed_of(builder),
+            "your reply restarted no launch of the builder's session",
+        )
+        self.spawned = [*self.spawned, restarted]
+        self.until(
+            lambda: self.said_by(party, "FIG", after=reply.number) is not None,
+            f"no answer of theirs holding FIG came within {self.patience}",
+        )
+        self.end(restarted)
+        return (
+            f"Your reply, @{reply.number}, restarted `{builder.name}` held, as launch "
+            f"{restarted.launch}; it answered with the word it first answered, and "
+            "the trial ended it."
+        )
+
+    def side_job_tidied(self) -> str:
+        """See the session's side job's worktree removed once the launch that spawned it ended: its branch holds nothing of its own."""
+        side = self.side
+        if side is None:
+            message = "the session spawned no side job"
+            raise TrialError(message)
+        self.until(
+            lambda: not side.worktree.exists(),
+            f"its worktree, {side.worktree}, stayed {self.patience} after the launch "
+            "that spawned it ended",
+        )
+        return f"Its worktree, {side.worktree}, went once the session's launch ended."
+
+    def own_room_stopped(self) -> str:
+        """Run a command that never ends in a room of the repository's own, and see podman's monitor end it past its limit, before the service's wait on it runs out."""
+        began = self.clock.now()
+        ran = self.own_room(["sleep", "3599"], self.stopping, self.stopped)
+        took = self.clock.now() - began
+        if ran.status == 124:
+            message = (
+                f"the service's wait on it ran out, after {spelled(took)}, and it was "
+                "removed by its name: podman's monitor didn't end it past its limit"
+            )
+            raise TrialError(message)
+        return (
+            f"podman's monitor ended it after {spelled(took)}, with status "
+            f"{ran.status}, before the service's wait ran out."
+        )
+
+    def spawned_elsewhere(self) -> str:
+        """Have the session spawn a side job in the repository `into` names, and see it held in a worktree of that repository's, its report reach the session, which answers with it, and it end there."""
+        launch = self.launch()
+        sent = self.sent(
+            f"Call lup's `spawn` tool with `name` `trial elsewhere`, `repository` "
+            f"`{self.into}`, no `concern` and no `start`, and the `brief`: Answer "
+            "with the single word QUINCE, and nothing else. Then call `wait_inbox` "
+            "until its report reaches you, and answer me with the single word its "
+            "report holds, and nothing else."
+        )
+        side = self.found(
+            lambda: next(
+                (
+                    each
+                    for each in self.host.launches()
+                    if each.spawner is not None
+                    and each.spawner.launch == launch.launch
+                    and each.repository != launch.repository
+                ),
+                None,
+            ),
+            f"no launch the session spawned in `{self.into}` is served",
+        )
+        self.spawned = [*self.spawned, side]
+        if not side.held or side.worktree.parent != side.repository / "tree":
+            message = (
+                f"`{side.name}` works in {side.worktree} of {side.repository}, not "
+                "held in a worktree of its own there"
+            )
+            raise TrialError(message)
+        self.until(
+            lambda: self.answer(sent, "QUINCE") is not None,
+            f"the session's answer holding its side job's report, QUINCE, didn't come "
+            f"within {self.patience}",
+        )
+        self.until(
+            lambda: not self.serves(side.launch),
+            "the side job runs on after its report, where it ends",
+        )
+        return (
+            f"`{side.name}` started held in {side.worktree}, of {side.repository}; "
+            "its report reached the session, which answered with it, and it ended."
+        )
 
     def briefed(self, party: Conversation) -> str:
         """Say how the brief the trial's session sent `party` was told; raise where it was never told, or told otherwise than given once as its first turn: told twice, beside a hook too, it reads as `told` some other way."""
@@ -1093,8 +1271,10 @@ print(len(found))
                 "interrupt, outlives a restart of the host service, spawns a "
                 "side job whose report comes back to it, ending there, and "
                 "resumes it with a `send`, hands a concern over to one you "
-                "talk with directly, which outlives it, ends, resumes, and "
-                "passes to a terminal and back. A launch's setup "
+                "talk with directly, which outlives it and which your reply "
+                "restarts once it ended, ends, tidies its side job's worktree, "
+                "resumes, and passes to a terminal and back; a room of the "
+                "repository's own ends in time. A launch's setup "
                 f"took {spelled(self.steps[0].took)}. Not tried here: the other "
                 "runtime, holds of hours, and an interactive terminal."
             )
@@ -1202,21 +1382,36 @@ class Scratch(Model):
         )
 
     def unspawned(self, spawned: list[Register], say: Callable[[str], None]) -> None:
-        """Remove the worktree and the branch of each launch the trial's session spawned, whatever is in them, each under `tree/` of the repository and named for its branch (`made_root`), the removal given as long as git removing a whole worktree is (`Git.whole`); where git can't, say so, and go on."""
+        """Remove the worktree and the branch of each launch the trial's session spawned, whatever is in them, each under `tree/` of its repository, this one's or another's, and named for its branch (`made_root`), by git pinned to that repository, the removal given as long as git removing a whole worktree is (`Git.whole`); one the sweep removed already is passed over; where git can't, say so, and go on."""
         # A side job resumed holds the worktree it was spawned in: each once.
         for each in {launch.worktree: launch for launch in spawned}.values():
-            if each.worktree.parent != self.repository / "tree":
+            if each.worktree.parent != each.repository / "tree":
                 say(f"{each.worktree} isn't one a spawn made, so it's left.")
                 continue
+            git = (
+                self.git
+                if each.repository == self.repository
+                else Git.pinned(each.repository)
+            )
             try:
-                self.git.run(
-                    "worktree",
-                    "remove",
-                    "--force",
-                    str(each.worktree),
-                    within=self.git.whole,
+                if each.worktree.exists():
+                    git.run(
+                        "worktree",
+                        "remove",
+                        "--force",
+                        str(each.worktree),
+                        within=git.whole,
+                    )
+                branch = git.run(
+                    "rev-parse",
+                    "--verify",
+                    "--quiet",
+                    "--end-of-options",
+                    f"refs/heads/{each.worktree.name}",
+                    ok=[0, 1],
                 )
-                self.git.run("branch", "-D", "--end-of-options", each.worktree.name)
+                if branch.status == 0:
+                    git.run("branch", "-D", "--end-of-options", each.worktree.name)
             except GitError as failed:
                 say(
                     f"{each.worktree}, which the trial's session spawned in, stays: {failed}"

@@ -37,7 +37,7 @@ from typer.core import TyperGroup
 
 from lup.doors import served as methods
 from lup.errors import LupError
-from lup.programs import Apart, detached
+from lup.programs import Apart, Ran, detached
 from lup.rooms import ContainerError, Mount, Podman, Room
 from lup.rooms.engine import stopped
 from lup.types import JsonObject, Model, MutableModel
@@ -246,6 +246,7 @@ from lup_dev.inbox.threaded import routes as threaded_routes
 from lup_dev.inbox.tools import InboxTools
 from lup_dev.inbox.typed import TypeReader
 from lup_dev.launch.clis import CliCache
+from lup_dev.launch.git_room import GitRoom
 from lup_dev.launch.held import Holder, Writing, untraceable
 from lup_dev.launch.hidden import removed
 from lup_dev.launch.homes import LaunchHome
@@ -3518,13 +3519,25 @@ def spawn_trial(
             "--model", help="The model the trial's session runs on, by its alias."
         ),
     ] = "haiku",
+    into: Annotated[
+        str | None,
+        typer.Option(
+            "--into",
+            help=(
+                "Another repository the trial's session spawns a side job in, by "
+                "the name your layer gives it with `spawn=True`."
+            ),
+        ),
+    ] = None,
 ) -> None:
     """Try a held session end to end, once, on this machine, and file the report in your inbox.
 
     Run it yourself, in your own terminal, in a worktree of a repository you
     approved. In a scratch worktree beside this one, it starts a held session,
     sends it your words and sees its answer, interrupts a long turn, restarts
-    the host service and sees the session survive, ends it, resumes it held,
+    the host service and sees the session survive, has it spawn a side job and
+    a builder, in another repository too with `--into`, ends it, restarts the
+    builder with a reply, sees the side job's worktree tidied, resumes it held,
     has a terminal launch take it over, and resumes it held again; then it
     removes the scratch worktree and files what passed, what failed and what
     that means (`lup_dev.launch.trial`). It takes a few minutes, a few short
@@ -3565,12 +3578,20 @@ def spawn_trial(
             ran = podman.inside(container, command)
             return TerminalRun(status=ran.status, output=ran.text())
 
+        def own_room(command: list[str], within: timedelta, waiting: timedelta) -> Ran:
+            room = GitRoom(
+                repository=scratch.repository, within=within, waiting=waiting
+            )
+            return asyncio.run(room.ran(command))
+
         trial = Trial(
             host=host_client(),
             spawn=spawning,
             terminal=terminal,
             running=running,
             inside=inside,
+            own_room=own_room,
+            into=into,
             clock=SystemClock(),
             say=typer.echo,
             worktree=scratch.path,

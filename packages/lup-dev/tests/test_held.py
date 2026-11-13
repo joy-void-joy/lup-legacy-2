@@ -56,6 +56,7 @@ from lup_dev.host.protocol import (
 from lup_dev.host.service import Dispatcher, Program, Route, unix_server
 from lup_dev.host.watch import Changes
 from lup_dev.inbox.protocol import (
+    AnswerItem,
     Exchange,
     Exchanged,
     FileReport,
@@ -561,6 +562,22 @@ class Played(HostClient):
                     if any(self.reporting):
                         self.item(side, Operator(), "LIME")
                     self.item(self.conversation, Operator(), "LIME")
+                elif "`trial elsewhere`" in text:
+                    [spawner] = [each for each in self.served if each.spawner is None]
+                    elsewhere = held("trial-elsewhere").model_copy(
+                        update={
+                            "name": "trial-elsewhere",
+                            "repository": Path("/y/.git"),
+                            "worktree": Path("/y/.git/tree/trial-elsewhere"),
+                            "session": "s-trial-elsewhere",
+                            "spawner": Spawner(
+                                launch=spawner.launch, conversation=self.conversation
+                            ),
+                        }
+                    )
+                    self.served.append(elsewhere)
+                    self.fleeting.append(elsewhere.launch)
+                    self.item(self.conversation, Operator(), "QUINCE")
                 elif "`trial builder`" in text:
                     builder = self.spawned("trial-builder", 5)
                     self.item(self.conversation, Operator(), "SENT")
@@ -602,6 +619,26 @@ class Played(HostClient):
                 return reply.model_validate(
                     Shown(item=self.items[number - 1]).model_dump()
                 )
+            case AnswerItem(number=number, comment=comment):
+                # A reply to a spawned session that ended restarts it, and it
+                # answers with what it knew.
+                sender = self.items[number - 1].sender
+                assert isinstance(sender, Conversation)
+                replied = self.item(Operator(), sender, comment)
+                [launch] = [
+                    name for name, party in self.sessions.items() if party == sender
+                ]
+                [ended] = [
+                    each
+                    for each in [held(launch)]
+                    if launch not in [served.launch for served in self.served]
+                ]
+                again = ended.model_copy(
+                    update={"launch": f"{launch}-2", "session": sender.session}
+                )
+                self.served.append(again)
+                self.item(sender, Operator(), "FIG")
+                return reply.model_validate(Shown(item=replied).model_dump())
             case _:
                 return reply.model_validate(Done().model_dump())
 
@@ -678,6 +715,7 @@ def played(tmp_path: Path, clock: FakeClock) -> tuple[Played, Trial]:
             each.container == container for each in host.served
         ),
         inside=inside,
+        own_room=lambda command, within, waiting: Ran(command=command, status=137),
         executing=killed,
         clock=clock,
         say=lambda _: None,
@@ -710,6 +748,9 @@ def test_the_trial_tries_each_step_and_files_what_it_saw_under_the_session(
         ("hands a concern over", True),
         ("ends", True),
         ("a builder outlives its spawner", True),
+        ("your reply restarts the builder", True),
+        ("a side job's worktree goes with its spawner", True),
+        ("a room of the repository's own ends in time", True),
         ("resumes held", True),
         ("a terminal takes it over", True),
         ("back to held", True),
@@ -717,7 +758,7 @@ def test_the_trial_tries_each_step_and_files_what_it_saw_under_the_session(
     report = written(host.items[number - 1])
     assert report.startswith(
         f"**Spawn's trial**, `lup-dev spawn trial`, in {tmp_path / 'spawn-trial-1'}: "
-        "14 of 14 steps passed."
+        "17 of 17 steps passed."
     )
     assert "**What it means:** a session lup holds with no terminal works" in report
     assert host.items[number - 1].sender == host.conversation
@@ -730,6 +771,29 @@ def test_the_trial_tries_each_step_and_files_what_it_saw_under_the_session(
         and each.number != noted.number
     ]
     assert host.restarts == [0]
+
+
+def test_a_trial_given_another_repository_has_its_session_spawn_a_side_job_there(
+    tmp_path: Path, clock: FakeClock
+) -> None:
+    host, trial = played(tmp_path, clock)
+    trial.into = "yonder"
+
+    steps = trial.run()
+
+    [elsewhere] = [
+        each for each in steps if each.name == "spawns in another repository"
+    ]
+    assert elsewhere.passed, elsewhere.seen
+    assert elsewhere.seen == (
+        "`trial-elsewhere` started held in /y/.git/tree/trial-elsewhere, of "
+        "/y/.git; its report reached the session, which answered with it, and it "
+        "ended."
+    )
+    asked = [each for each in host.asked if isinstance(each, SendItem)]
+    assert any("`repository` `yonder`" in each.text for each in asked)
+    assert all(each.passed for each in steps), [each.seen for each in steps]
+    assert len(steps) == 18
 
 
 def test_a_trial_whose_session_never_starts_says_so_and_files_it_anyway(
@@ -747,7 +811,7 @@ def test_a_trial_whose_session_never_starts_says_so_and_files_it_anyway(
 
     assert [(each.name, each.passed) for each in steps] == [("held", False)]
     report = written(host.items[number - 1])
-    assert "0 of 14 steps passed." in report
+    assert "0 of 17 steps passed." in report
     assert (
         "- **held**, failed in 0 s: the launcher of launch h1 ended before its "
         "session was up"
@@ -757,8 +821,9 @@ def test_a_trial_whose_session_never_starts_says_so_and_files_it_anyway(
         "Not tried, after that: answers, the room can't type as the operator, "
         "a room's command is stopped in time, interrupts, survives a restart, "
         "spawns a side job, resumes its side job, hands a concern over, ends, a "
-        "builder outlives its spawner, resumes held, a terminal takes it over, back "
-        "to held."
+        "builder outlives its spawner, your reply restarts the builder, a side job's "
+        "worktree goes with its spawner, a room of the repository's own ends in "
+        "time, resumes held, a terminal takes it over, back to held."
     ) in report
     sender = host.items[number - 1].sender
     assert isinstance(sender, Conversation)
@@ -1225,9 +1290,8 @@ def test_the_trial_removes_the_worktree_and_branch_of_each_launch_its_session_sp
     scratch = Scratch(path=main, repository=repository, git=Git.pinned(repository))
     outside = held("elsewhere").model_copy(update={"worktree": tmp_path / "elsewhere"})
 
-    scratch.unspawned(
-        [held("side").model_copy(update={"worktree": made}), outside], said.append
-    )
+    side = held("side").model_copy(update={"worktree": made, "repository": repository})
+    scratch.unspawned([side, outside], said.append)
 
     assert not made.exists()
     assert (

@@ -106,7 +106,11 @@ class GitRoom(Model, arbitrary_types_allowed=True):
         return max(images, key=lambda each: each.created).id
 
     async def git(self, arguments: list[str]) -> Ran:
-        """Run git with `arguments` on the repository, in a room of its own (`Podman.once`), and return how it ended, whatever its status: 124 where it ran past `within`. Raise `GitRoomError` where no room can be started for it."""
+        """Run git with `arguments` on the repository, in a room of its own (`ran`), and return how it ended, whatever its status: 124 where the host's wait on it ran out. Raise `GitRoomError` where no room can be started for it."""
+        return await self.ran(["git", "--git-dir", str(self.repository), *arguments])
+
+    async def ran(self, command: list[str]) -> Ran:
+        """Run `command` in a room of the repository's own (`Podman.once`), and return how it ended, whatever its status: 124 where the host's wait on it ran out, its room then removed by its name. Raise `GitRoomError` where no room can be started for it. `git` runs git there; `lup-dev spawn trial` runs a command that never ends, to see podman's monitor end it."""
         image = await self.image()
         hooks = self.repository / "hooks"
         hooks.mkdir(exist_ok=True)
@@ -127,7 +131,7 @@ class GitRoom(Model, arbitrary_types_allowed=True):
                 "HOME": "/",
             },
             workdir=self.repository,
-            command=["git", "--git-dir", str(self.repository), *arguments],
+            command=command,
             name=name,
             within=self.within,
         )
