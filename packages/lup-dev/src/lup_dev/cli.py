@@ -282,7 +282,7 @@ from lup_dev.launch.session import (
     hooked,
     terminal_settings,
 )
-from lup_dev.launch.spawning import SpawnTools
+from lup_dev.launch.spawning import SpawnTools, spawnable_in
 from lup_dev.launch.trial import TerminalRun, Trial, scratched, taken_over_there
 from lup_dev.launch.trust import (
     Approving,
@@ -806,6 +806,7 @@ def host_serve(context: typer.Context) -> None:
     spawning = spawn_tools(delivery, layout, launchers, known)
     delivery.resumer = spawning.resumed
     delivery.restarter = spawning.restarted
+    delivery.elsewhere = partial(spawnable_in, layout)
 
     async def reap() -> None:
         for each in launchers.reaped(layout):

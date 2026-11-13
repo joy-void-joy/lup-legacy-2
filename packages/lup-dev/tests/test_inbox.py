@@ -20,6 +20,7 @@ import time
 from concurrent.futures import Future, ThreadPoolExecutor, wait
 from contextlib import asynccontextmanager, contextmanager
 from datetime import UTC, datetime, timedelta
+from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, NamedTuple, override
 
@@ -53,6 +54,7 @@ from lup_dev.adapters.claude import (
     ClaudeTranscripts,
 )
 from lup_dev.approval import Approval as StoredApproval
+from lup_dev.approval import ReleaseTool, Spawnable
 from lup_dev.codescan.contract import FileReport, Parser, Source
 from lup_dev.codescan.engine import EngineError
 from lup_dev.commanding import RoomMarks
@@ -217,7 +219,7 @@ from lup_dev.inbox.threads import spoken
 from lup_dev.inbox.tools import Reach, Speaker, specs
 from lup_dev.inbox.typed import TypeReader
 from lup_dev.launch.room import RoomError
-from lup_dev.launch.spawning import SpawnTools
+from lup_dev.launch.spawning import SpawnTools, spawnable_in
 from lup_dev.layout import CopyLayout, GitDirectoryLayout, InboxLayout, Layout
 from lup_dev.merging import Merging, gated_commit, merged
 from lup_dev.policy import landing as landing_module
@@ -577,6 +579,7 @@ def inboxed(
     )
     delivery.resumer = spawner.resumed
     delivery.restarter = spawner.restarted
+    delivery.elsewhere = partial(spawnable_in, machine)
     landing = LandingTools(
         delivery=delivery,
         layout=judging or machine,
@@ -5369,6 +5372,7 @@ def test_the_inbox_tools_take_the_speaking_tools_names_and_inputs() -> None:
         "hand",
         "park",
         "done",
+        "repository",
     ]
     assert [properties(spec.input_schema) for spec in served[:6]] == [
         [*properties(library[0]), "thread"],
@@ -14389,6 +14393,7 @@ class SpawnsMade:
         hung: bool = False,
         stuck: bool = False,
         missing: bool = False,
+        built: bool = True,
         **fields: object,
     ) -> None:
         self.limit = limit
@@ -14399,6 +14404,9 @@ class SpawnsMade:
         """Whether the room's `git worktree add` alone never ends."""
         self.missing = missing
         """Whether each launcher can't be started, as where `lup-dev` is gone."""
+        self.built = built
+        """Whether podman lists a room image of each repository, which a room of
+        its own for its git runs: `old1`, then `new2`, built after it."""
         self.fields = fields
         """The tool's other fields, as the test sets them."""
         self.programs: list[Program] = []
@@ -14415,6 +14423,23 @@ class SpawnsMade:
             """Answer `program` as `executed` would: one that never ends killed past its `within`, with status 124."""
             self.programs.append(program)
             self.running.set()
+            if program.command[:2] == ["podman", "images"]:
+                images = [
+                    {
+                        "Id": "old1",
+                        "Created": "2026-10-01T00:00:00Z",
+                        "Size": 1,
+                        "Containers": 0,
+                    },
+                    {
+                        "Id": "new2",
+                        "Created": "2026-10-02T00:00:00Z",
+                        "Size": 1,
+                        "Containers": 0,
+                    },
+                ]
+                listed = json.dumps(images if self.built else []).encode()
+                return Ran(command=program.command, status=0, output=listed)
             if self.hung or (self.stuck and "add" in program.command):
                 with contextlib.suppress(TimeoutError):
                     async with asyncio.timeout(program.within.total_seconds()):
@@ -15721,6 +15746,225 @@ def test_a_side_job_ends_at_its_report_and_its_spawner_s_send_resumes_it(
     )
 
 
+def kept_approval(
+    machine: Layout, repository: Path, spawnable: list[Spawnable] | None = None
+) -> None:
+    """Keep an approval for `repository`, as trust keeps one, its declaration letting its sessions spawn in `spawnable`."""
+    write_model(
+        machine.approved(repository),
+        StoredApproval(
+            commit="0" * 40,
+            fingerprint="",
+            paths=[],
+            tool=ReleaseTool(name="lup-dev", version="0", registry="", pins={}),
+            time=datetime(2026, 10, 1, tzinfo=UTC),
+            spawnable=spawnable or [],
+        ),
+    )
+
+
+def test_a_spawn_in_another_repository_the_approval_lets_it_is_made_there_by_that_repository_s_own_git(
+    machine: Layout, clock: FakeClock, notices: Raised, said: list[str], tmp_path: Path
+) -> None:
+    """Its worktree is made by a room of that repository's own, from its own branch, its concern a new one at that repository's top, the session spawned holding it, its brief from the spawner."""
+    worktree, yonder = tmp_path / "w", tmp_path / "yonder"
+    spawnable(worktree)
+    theirs = spawnable(yonder)
+    repository, other = worktree / ".git", yonder / ".git"
+    kept_approval(machine, repository, [Spawnable(name="yonder", path=yonder)])
+    kept_approval(machine, other)
+    spawned = SpawnsMade()
+    with inboxed(
+        machine,
+        clock,
+        notices,
+        said,
+        spawning=lambda delivery, launchers: spawned.tools(
+            delivery, machine, launchers
+        ),
+    ) as delivery:
+        launched(machine, clock, worktree, "one", "claude")
+        hook, mcp = machine.host.launch("one").hook, machine.host.launch("one").mcp
+        send(hook, claude("SessionStart", source="startup"))
+        answer, error = call(
+            mcp,
+            "spawn",
+            {
+                "name": "fix tabs",
+                "brief": "Fix the tabs.",
+                "concern": "Tabs break",
+                "repository": "yonder",
+            },
+        )
+        brief = numbers(delivery)[-2]
+        handed = delivery.concerns().found(other, "tabs-break")
+    root = other / "tree" / "fix-tabs"
+    spawner = Conversation(repository=repository, runtime="claude", session="s1")
+    [listing, adding] = spawned.programs
+    [launch] = spawned.launches
+    assert launch.session is not None
+    child = Conversation(repository=other, runtime="claude", session=launch.session)
+    assert not error, answer
+    assert f"label=lup.project={other}" in listing.command
+    assert "exec" not in adding.command
+    assert adding.command[-10:] == [
+        "git",
+        "--git-dir",
+        str(other),
+        "worktree",
+        "add",
+        "--quiet",
+        "-b",
+        "fix-tabs",
+        str(root),
+        theirs,
+    ]
+    assert isinstance(handed, Thread)
+    assert handed.holder == child
+    assert handed.parent is None
+    assert launch.model_dump(exclude={"launch", "session"}) == HeldLaunch(
+        launch=launch.launch,
+        runtime="claude",
+        worktree=root,
+        repository=other,
+        spawner=Spawner(launch="one", conversation=spawner, concern=handed.number),
+    ).model_dump(exclude={"launch", "session"})
+    item = delivery.inbox.item(brief)
+    assert (item.sender, item.recipient) == (spawner, child)
+
+
+@pytest.mark.parametrize(
+    ("approved", "named", "why"),
+    [
+        (
+            [],
+            "yonder",
+            (
+                "`yonder` isn't a repository your project lets its sessions spawn "
+                "in, as the operator approved it: those are none"
+            ),
+        ),
+        (
+            [Spawnable(name="yonder", path=Path("/nowhere/yonder"))],
+            "yonder",
+            "`yonder` isn't a repository at /nowhere/yonder on this machine",
+        ),
+        (
+            [Spawnable(name="here", path=Path("HERE"))],
+            "here",
+            "`here` is this repository: leave `repository` out",
+        ),
+        (
+            [Spawnable(name="yonder", path=Path("YONDER"))],
+            "yonder",
+            (
+                "nothing is approved for `yonder`, so nothing launches there: the "
+                "operator launches there once first"
+            ),
+        ),
+    ],
+)
+def test_a_spawn_in_another_repository_is_refused_unless_the_approval_lets_it_and_one_was_approved_there(
+    machine: Layout,
+    clock: FakeClock,
+    notices: Raised,
+    said: list[str],
+    tmp_path: Path,
+    *,
+    approved: list[Spawnable],
+    named: str,
+    why: str,
+) -> None:
+    """What lets it is what the host kept as the operator approved the spawner's repository, never a declaration a room wrote; and what starts there runs on that repository's own approval, so none there launches nothing."""
+    worktree, yonder = tmp_path / "w", tmp_path / "yonder"
+    spawnable(worktree)
+    spawnable(yonder)
+    repository = worktree / ".git"
+    places = {Path("HERE"): worktree, Path("YONDER"): yonder}
+    kept_approval(
+        machine,
+        repository,
+        [
+            each.model_copy(update={"path": places.get(each.path, each.path)})
+            for each in approved
+        ],
+    )
+    spawned = SpawnsMade()
+    with inboxed(
+        machine,
+        clock,
+        notices,
+        said,
+        spawning=lambda delivery, launchers: spawned.tools(
+            delivery, machine, launchers
+        ),
+    ):
+        launched(machine, clock, worktree, "one", "claude")
+        hook, mcp = machine.host.launch("one").hook, machine.host.launch("one").mcp
+        send(hook, claude("SessionStart", source="startup"))
+        answer, _ = call(
+            mcp,
+            "spawn",
+            {"name": "fix tabs", "brief": "Fix the tabs.", "repository": named},
+        )
+    assert answer == f"Not spawned: {why}"
+    assert spawned.programs == []
+    assert spawned.launches == []
+
+
+def test_a_concern_filed_in_another_repository_the_approval_lets_it_lands_in_its_no_agent(
+    machine: Layout, clock: FakeClock, notices: Raised, said: list[str], tmp_path: Path
+) -> None:
+    """At its top, nobody holding it, its words its body, left by the agent who filed it: the ledger keeps an item in its sender's repository, so they're no item there. Anything but `text` and `title` is refused, as is a repository the approval doesn't let it file in."""
+    worktree, yonder = tmp_path / "w", tmp_path / "yonder"
+    spawnable(worktree)
+    spawnable(yonder)
+    repository, other = worktree / ".git", yonder / ".git"
+    kept_approval(machine, repository, [Spawnable(name="yonder", path=yonder)])
+    kept_approval(machine, other)
+    with inboxed(machine, clock, notices, said) as delivery:
+        launched(machine, clock, worktree, "one", "claude")
+        hook, mcp = machine.host.launch("one").hook, machine.host.launch("one").mcp
+        send(hook, claude("SessionStart", source="startup"))
+        filed, _ = call(
+            mcp,
+            "concern",
+            {
+                "text": "The tabs break on resize.\nSeen in the review.",
+                "repository": "yonder",
+            },
+        )
+        held, _ = call(
+            mcp,
+            "concern",
+            {"text": "Mine.", "hold": True, "repository": "yonder"},
+        )
+        unknown, _ = call(
+            mcp, "concern", {"text": "Elsewhere.", "repository": "nowhere"}
+        )
+        concerns = delivery.concerns()
+        thread = concerns.found(other, "the-tabs-break-on-resize")
+        body = None if not isinstance(thread, Thread) else concerns.body(thread)
+    spawner = Conversation(repository=repository, runtime="claude", session="s1")
+    assert filed == (
+        "Filed @the-tabs-break-on-resize in `yonder`'s `No agent`, nobody holding "
+        "it, your words its body, for its agents and the operator to take up. You "
+        "can carry on."
+    )
+    assert isinstance(thread, Thread)
+    assert (thread.holder, thread.parent, thread.by) == (None, None, spawner)
+    assert body is not None
+    assert body.text == "The tabs break on resize.\nSeen in the review."
+    assert held == (
+        "Nothing filed: a concern filed in another repository takes `text` and a "
+        "`title` alone"
+    )
+    assert unknown == (
+        "Nothing filed: `nowhere` isn't a repository your project lets its "
+        "sessions spawn in, as the operator approved it: those are `yonder`"
+    )
+
+
 def builder_ended(
     machine: Layout,
     clock: FakeClock,
@@ -15838,6 +16082,63 @@ def test_a_spawner_s_send_resumes_an_ended_builder_keeping_the_concern_it_handed
     )
 
 
+def test_a_restart_makes_a_worktree_gone_again_where_it_was_in_a_room_of_the_repository_s_own(
+    machine: Layout, clock: FakeClock, notices: Raised, said: list[str], tmp_path: Path
+) -> None:
+    """Landed and cleaned up, or removed with its spawner: its runtime files its record by the worktree's path, so it's made there again, on a branch of its name from the branch work starts from where its own is gone, by the repository's git in a room started for it from its latest image."""
+    worktree = tmp_path / "w"
+    commit = spawnable(worktree)
+    repository = worktree / ".git"
+    spawned = SpawnsMade()
+    with inboxed(
+        machine,
+        clock,
+        notices,
+        said,
+        holding=True,
+        spawning=lambda delivery, launchers: spawned.tools(
+            delivery, machine, launchers
+        ),
+    ) as delivery:
+        launched(machine, clock, worktree, "one", "claude")
+        send(machine.host.launch("one").hook, claude("SessionStart", source="startup"))
+        spec, child, ending = builder_ended(
+            machine, clock, delivery, spawned, repository, kept=False
+        )
+        made = len(spawned.programs)
+        inbox("answer", str(ending), "--comment", "The keys too.")
+    [_, restarted] = spawned.launches
+    listing, pruning, _, adding = spawned.programs[made:]
+    assert listing.command[:2] == ["podman", "images"]
+    *walls, image, git, gitdir, place, worktrees, prune = pruning.command
+    pruned = [worktrees, prune]
+    assert walls[:2] == ["podman", "run"]
+    assert "--network=none" in walls
+    assert f"--mount=type=bind,source={repository},destination={repository}" in walls
+    assert (
+        f"--mount=type=bind,source={repository / 'config'},"
+        f"destination={repository / 'config'},ro=true"
+    ) in walls
+    assert (image, git, gitdir, place, pruned) == (
+        "new2",
+        "git",
+        "--git-dir",
+        str(repository),
+        ["worktree", "prune"],
+    )
+    assert adding.command[-7:] == [
+        "worktree",
+        "add",
+        "--quiet",
+        "-b",
+        "x",
+        str(spec.worktree),
+        commit,
+    ]
+    assert restarted.resume == child.session
+    assert restarted.worktree == spec.worktree
+
+
 def test_the_operator_s_reply_to_an_ended_builder_it_can_t_restart_is_said_to_them(
     machine: Layout, clock: FakeClock, notices: Raised, said: list[str], tmp_path: Path
 ) -> None:
@@ -15845,7 +16146,7 @@ def test_the_operator_s_reply_to_an_ended_builder_it_can_t_restart_is_said_to_th
     worktree = tmp_path / "w"
     spawnable(worktree)
     repository = worktree / ".git"
-    spawned = SpawnsMade()
+    spawned = SpawnsMade(built=False)
     with inboxed(
         machine,
         clock,
@@ -15869,8 +16170,10 @@ def test_the_operator_s_reply_to_an_ended_builder_it_can_t_restart_is_said_to_th
     assert item.reason == Message(
         kind="problem",
         text=(
-            f"lup: `x` had ended, and your words in @{reply} didn't "
-            f"restart them: its worktree, {spec.worktree}, is gone."
+            f"lup: `x` had ended, and your words in @{reply} didn't restart them: "
+            f"its worktree, {spec.worktree}, is gone, and can't be made again: no "
+            f"room image of {repository} is built, which its git runs in: a launch "
+            "there builds one."
         ),
     )
 

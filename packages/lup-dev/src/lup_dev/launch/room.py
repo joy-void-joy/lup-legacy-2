@@ -362,6 +362,9 @@ class RelatedRepository(Model):
     mounted: bool
     """Whether the room mounts it: false where nothing is at its path, which the
     launch says once."""
+    spawn: bool = False
+    """Whether the project's sessions may spawn in it and file concerns into
+    its `No agent`, as its entry says (`Repository.spawn`)."""
 
 
 def related(named: list[kinds.Repository], held: Repository) -> list[RelatedRepository]:
@@ -382,6 +385,7 @@ def related(named: list[kinds.Repository], held: Repository) -> list[RelatedRepo
             about=declared.about,
             github=declared.github,
             mounted=path.is_dir(),
+            spawn=declared.spawn,
         )
 
     return [found(each) for each in named]

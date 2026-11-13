@@ -268,6 +268,16 @@ class Concerning(Model, title="Concern", extra="forbid"):
             "a list of commands with expected results."
         ),
     )
+    repository: str | None = Field(
+        default=None,
+        description=(
+            "File it in another repository's `No agent`, by the name your "
+            "guidance lists it under, where it says you may: `text` is its body, "
+            "`title` or its first line its title, and nobody holds it, for that "
+            "repository's agents and the operator to take up. Only `text` and "
+            "`title` go with it."
+        ),
+    )
 
 
 class Choice(Model):
@@ -611,7 +621,49 @@ class Speaker(Model, arbitrary_types_allowed=True):
         """
         if said == Concerning():
             return Said(text=self.listed(self.concerns))
+        if said.repository is not None:
+            return self.filed_elsewhere(said)
         return await self.filed(said, "concern")
+
+    def filed_elsewhere(self, said: Concerning) -> Said:
+        """File a concern in the `No agent` of the repository `said` names, which this one's approved declaration lets its sessions file into (`Delivery.elsewhere`): at its top, nobody holding it, `text` its body, left by this conversation.
+
+        Its words go in as its body rather than as an item: the ledger keeps an
+        item in its sender's repository, and a concern's items in its own.
+        """
+        named = said.repository
+        if named is None:
+            return Said(text="Nothing done: name the repository to file it in")
+        rest = said.model_copy(update={"text": None, "title": "", "repository": None})
+        if rest != Concerning():
+            return Said(
+                text=(
+                    "Nothing filed: a concern filed in another repository takes "
+                    "`text` and a `title` alone"
+                )
+            )
+        text = (said.text or "").strip()
+        if not text:
+            return Said(text="Nothing filed: say what it is, in `text`")
+        elsewhere = self.delivery.elsewhere
+        if elsewhere is None:
+            return Said(text="Nothing filed: no repository is open to it here")
+        concerns = self.concerns
+        try:
+            repository = elsewhere(self.party.repository, named)
+            thread = concerns.opened(
+                self.party, said.title.strip() or cue(text), repository, taken=True
+            )
+            concerns.bodied(self.party, thread, text)
+        except InboxError as refused:
+            return Said(text=f"Nothing filed: {refused}")
+        return Said(
+            text=(
+                f"Filed @{thread.name} in `{named}`'s `No agent`, nobody holding it, "
+                "your words its body, for its agents and the operator to take up. "
+                "You can carry on."
+            )
+        )
 
     async def friction(self, said: Frictional) -> Said:
         """Say what got in your way, and carry on.

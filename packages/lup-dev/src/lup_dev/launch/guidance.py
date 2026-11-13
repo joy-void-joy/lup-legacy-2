@@ -152,6 +152,10 @@ def repositories(neighbours: list[RelatedRepository]) -> str:
     ...         name="beacon", path=Path("/src/beacon.git"), about="another made-up neighbour",
     ...         github=None, mounted=False,
     ...     ),
+    ...     RelatedRepository(
+    ...         name="cairn", path=Path("/src/cairn.git"), about="a third",
+    ...         github=None, mounted=True, spawn=True,
+    ...     ),
     ... ]))
     ## Other repositories
     <BLANKLINE>
@@ -159,6 +163,7 @@ def repositories(neighbours: list[RelatedRepository]) -> str:
     <BLANKLINE>
     - `atlas`, a made-up neighbour. At `/src/atlas.git`, mounted. On GitHub as `someone/atlas`.
     - `beacon`, another made-up neighbour. At `/src/beacon.git`, missing: it isn't on this machine, so it isn't mounted.
+    - `cairn`, a third. At `/src/cairn.git`, mounted. You may start an agent there with `spawn`, and file a concern into its `No agent` with `concern`, each given `repository="cairn"`.
     """
 
     def entry(each: RelatedRepository) -> str:
@@ -168,8 +173,13 @@ def repositories(neighbours: list[RelatedRepository]) -> str:
             else "missing: it isn't on this machine, so it isn't mounted"
         )
         github = [] if each.github is None else [f"On GitHub as `{each.github}`."]
+        spawning = (
+            "You may start an agent there with `spawn`, and file a concern into "
+            f'its `No agent` with `concern`, each given `repository="{each.name}"`.'
+        )
+        spawn = [spawning] if each.spawn else []
         said = [f"- `{each.name}`, {each.about}.", f"At `{each.path}`, {state}."]
-        return " ".join([*said, *github])
+        return " ".join([*said, *github, *spawn])
 
     opening = (
         "These other repositories are named for you to read. Each one mounted is "

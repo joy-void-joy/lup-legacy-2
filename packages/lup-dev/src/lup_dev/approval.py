@@ -161,6 +161,16 @@ type Tool = Annotated[WorkspaceTool | ReleaseTool, Field(discriminator="kind")]
 """The `lup-dev` the host runs for a repository: its workspace's own, or a release."""
 
 
+class Spawnable(Model):
+    """Another repository the declaration approved lets the project's sessions spawn in, and file concerns into (`Repository.spawn`), as the approval found it on the host."""
+
+    name: str
+    """How the declaration names it, as the guidance lists it and `spawn` takes it."""
+    path: Path
+    """Where it is on the host, absolute and resolved: a bare repository's git
+    directory, or a clone's working tree."""
+
+
 class Approval(Model):
     """The host zone the operator approved last for a repository, and when."""
 
@@ -193,6 +203,13 @@ class Approval(Model):
     reads each file's role here, runs no project code to learn it, and needs no
     judge to have run (`approved_roles`, `lup_dev.policy.landing`). None
     where it couldn't be read, and in a record from before approvals kept it."""
+    spawnable: list[Spawnable] = []
+    """The other repositories its declaration lets the project's sessions spawn
+    in, the person's own layer on it, read as the operator approved it
+    (`Trust.answered`): what `spawn` and `concern` read, so a room's copy of
+    the person's layer, which it can write, never widens it, and no project
+    code runs to learn it. Where the declaration doesn't load, what the
+    approval before kept; none in a record from before approvals kept them."""
 
 
 def approved(layout: Layout, repository: Path) -> Approval | None:

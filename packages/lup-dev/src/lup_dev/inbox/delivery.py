@@ -990,6 +990,12 @@ class Delivery(MutableModel, Post, arbitrary_types_allowed=True):
     spawner, and their launch in; what to add to `send`'s answer out, empty
     where it's none of the spawner's to resume (`SpawnTools.resumed`, which
     `cli.py` gives). None resumes nothing."""
+    elsewhere: Callable[[Path, str], Path] | None = None
+    """Finds the repository another's approved declaration lets its sessions
+    spawn in and file concerns into, by the name it gives it: the asking
+    repository's git directory and that name in, the other's git directory
+    out; raises `InboxError` where it names none (`spawnable_in`, which
+    `cli.py` gives). None lets none."""
     restarter: Callable[[Conversation], Awaitable[str | None]] | None = None
     """Restarts a session an agent spawned that ended, its session held again
     with its context, where the operator's words reach it: its own
@@ -1303,9 +1309,10 @@ class Delivery(MutableModel, Post, arbitrary_types_allowed=True):
         they chose the one they started on. A subagent, or a session an agent
         spawned as a side job, heard the first time starts on the thread their
         parent works in (`Whereabouts.thread`), hearing only what's addressed to
-        them there until they choose it (`Whereabouts.chose_start`); a session
-        handed a concern with their spawn starts in it, theirs
-        (`Spawner.concern`).
+        them there until they choose it (`Whereabouts.chose_start`), where
+        it's their own repository's, since the ledger keeps what each says in
+        its own repository's threads; a session handed a concern with their
+        spawn starts in it, theirs (`Spawner.concern`).
         """
         place = self.inbox.whereabouts.get(party.key())
         if place is not None and place.launch == launch.launch and place.ended is None:
@@ -1320,7 +1327,11 @@ class Delivery(MutableModel, Post, arbitrary_types_allowed=True):
             if party.agent is not None or launch.spawner is None
             else launch.spawner.concern
         )
-        starting = handed or (None if above is None else above.thread)
+        starting = handed or (
+            None
+            if above is None or above.conversation.repository != party.repository
+            else above.thread
+        )
         self.inbox.placed(
             Whereabouts(
                 conversation=party,
