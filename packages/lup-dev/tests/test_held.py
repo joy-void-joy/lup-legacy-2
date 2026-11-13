@@ -1398,89 +1398,45 @@ def test_the_sweep_ends_each_side_job_whose_spawner_s_launch_isn_t_served(
     ) in said
 
 
-def test_the_sweep_removes_what_a_side_job_was_started_with_once_its_worktree_is_gone(
+def test_the_sweep_tidies_side_jobs_worktrees_apart_one_tidy_at_a_time_and_says_one_failing(
     layout: Layout, tmp_path: Path, clock: FakeClock
 ) -> None:
-    """Nothing resumes a side job whose worktree is gone, as `land` removes a landed branch's; one a room made a link is taken for gone, never followed."""
-    kept, gone, linked = tmp_path / "kept", tmp_path / "gone", tmp_path / "linked"
-    kept.mkdir()
-    linked.symlink_to(kept)
-    for session, worktree in [("c1", kept), ("c2", gone), ("c4", linked)]:
-        record = layout.spawned_session(session)
-        record.parent.mkdir(parents=True, exist_ok=True)
-        record.write_text(
-            HeldLaunch(
-                launch=f"l-{session}",
-                runtime="claude",
-                worktree=worktree,
-                session=session,
-            ).model_dump_json()
+    """Each room the tidy starts may take minutes, and any part of a worktree's path can be a link a room made, leading where a look waits: the sweep doesn't wait on it, and starts no other while one runs."""
+    host, _ = played(tmp_path, clock)
+    tidies: list[int] = []
+    said: list[str] = []
+
+    async def swept() -> bool:
+        released = asyncio.Event()
+
+        async def tidy() -> None:
+            tidies.append(1)
+            await released.wait()
+            message = "the room's git left a lock behind"
+            raise OSError(message)
+
+        sweeping = cli.Sweeping(
+            layout=layout,
+            host=host,
+            podman=Podman(),
+            say=said.append,
+            running=list,
+            tidy=tidy,
         )
-    layout.spawned_session("c3").write_text("{")
-    said: list[str] = []
-    host, _ = played(tmp_path, clock)
-    sweeping = cli.Sweeping(
-        layout=layout, host=host, podman=Podman(), say=said.append, running=list
-    )
+        sweeping.tidied()
+        await asyncio.sleep(0)
+        sweeping.tidied()
+        running = sweeping.tidying is not None and not sweeping.tidying.done()
+        released.set()
+        if sweeping.tidying is not None:
+            await sweeping.tidying
+        return running
 
-    sweeping.forgotten()
-
-    assert sorted(each.stem for each in layout.spawned_sessions.glob("*.json")) == [
-        "c1"
-    ]
-    assert said == [
-        f"What side job c2 was started with is removed: its worktree, {gone}, is gone.",
-        "What side job c3 was started with is removed: it didn't read.",
-        f"What side job c4 was started with is removed: its worktree, {linked}, is gone.",
-    ]
-
-
-def test_the_sweep_s_look_at_side_jobs_worktrees_holds_it_no_longer_than_its_limit(
-    layout: Layout, tmp_path: Path, clock: FakeClock, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Any part of a worktree's path can be a link a room made, leading where a look waits: the sweep goes on past `forgetting`, and starts no other look while that one runs."""
-    host, _ = played(tmp_path, clock)
-    released = threading.Event()
-    looks: list[int] = []
-
-    def waiting(self: cli.Sweeping) -> None:
-        looks.append(1)
-        released.wait(20)
-
-    monkeypatch.setattr(cli.Sweeping, "forgotten", waiting)
-    said: list[str] = []
-    sweeping = cli.Sweeping(
-        layout=layout,
-        host=host,
-        podman=Podman(),
-        say=said.append,
-        running=list,
-        forgetting=timedelta(seconds=0.5),
-    )
-
-    async def swept() -> float:
-        began = time.monotonic()
-        try:
-            await sweeping.forgot()
-            await sweeping.forgot()
-        finally:
-            released.set()
-        return time.monotonic() - began
-
-    took = asyncio.run(swept())
-
-    assert took < 5
-    assert looks == [1]
-    assert said == [
-        (
-            "The look at what side jobs were started with ran past 0:00:00.500000: "
-            "the sweep goes on without it."
-        ),
-        (
-            "The look at what side jobs were started with still runs, so none starts "
-            "beside it."
-        ),
-    ]
+    assert asyncio.run(swept())
+    assert tidies == [1]
+    [failed] = said
+    assert failed.startswith("The tidy of side jobs' worktrees failed:\n")
+    assert failed.endswith("OSError: the room's git left a lock behind\n")
 
 
 def test_side_jobs_the_sweep_ends_hold_none_of_the_threads_the_judge_s_hooks_wait_on(

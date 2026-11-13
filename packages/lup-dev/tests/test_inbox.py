@@ -14411,6 +14411,8 @@ class SpawnsMade:
         """The tool's other fields, as the test sets them."""
         self.programs: list[Program] = []
         self.launches: list[HeldLaunch] = []
+        self.served: SpawnTools | None = None
+        """The tool as the service serves it, once it's made."""
         self.running = threading.Event()
         """Set once a program is running."""
 
@@ -14459,7 +14461,7 @@ class SpawnsMade:
         served = cli.spawn_tools(
             delivery, machine, launchers, cli.Adapters(known=cli.adapters())
         )
-        return served.model_copy(
+        self.served = served.model_copy(
             update={
                 "spawning": Spawning(layout=machine, launchers=launchers, start=start),
                 "run": ran,
@@ -14468,6 +14470,7 @@ class SpawnsMade:
                 **self.fields,
             }
         )
+        return self.served
 
 
 def test_a_side_job_is_spawned_in_a_worktree_its_spawner_s_room_makes_its_brief_addressed_to_it(
@@ -15962,6 +15965,131 @@ def test_a_concern_filed_in_another_repository_the_approval_lets_it_lands_in_its
     assert unknown == (
         "Nothing filed: `nowhere` isn't a repository your project lets its "
         "sessions spawn in, as the operator approved it: those are `yonder`"
+    )
+
+
+def side_job_ended_with_its_spawner(
+    machine: Layout, clock: FakeClock, spawned: SpawnsMade, repository: Path
+) -> HeldLaunch:
+    """Spawn a side job through the tool from launch `one`, register its launch as its launcher would, let it report and end, and end launch `one`: what it was started with. Its worktree is made as the room's git would."""
+    mcp = machine.host.launch("one").mcp
+    answer, _ = call(mcp, "spawn", {"name": "x", "brief": "Time it."})
+    assert answer.startswith("`x` is starting"), answer
+    [spec] = spawned.launches
+    assert spec.session is not None
+    spec.worktree.mkdir(parents=True, exist_ok=True)
+    launched(
+        machine,
+        clock,
+        spec.worktree,
+        spec.launch,
+        "claude",
+        repository=repository,
+        held=True,
+        spawner=spec.spawner,
+    )
+    theirs = machine.host.launch(spec.launch).hook
+    send(theirs, claude("SessionStart", source="startup", session_id=spec.session))
+    send(
+        theirs,
+        claude(
+            "Stop",
+            stop_hook_active=False,
+            last_assistant_message="Four minutes.",
+            session_id=spec.session,
+        ),
+    )
+    client(machine.host, clock).unregister(spec.launch)
+    client(machine.host, clock).unregister("one")
+    return spec
+
+
+def test_a_side_job_s_worktree_goes_with_its_branch_once_its_spawner_s_launch_has_ended(
+    machine: Layout, clock: FakeClock, notices: Raised, said: list[str], tmp_path: Path
+) -> None:
+    """Its branch holds nothing beyond where it started: removed by the repository's own git in a room of its own, which refuses a worktree with anything uncommitted in it."""
+    worktree = tmp_path / "w"
+    spawnable(worktree)
+    repository = worktree / ".git"
+    spawned = SpawnsMade()
+    with inboxed(
+        machine,
+        clock,
+        notices,
+        said,
+        holding=True,
+        spawning=lambda delivery, launchers: spawned.tools(
+            delivery, machine, launchers
+        ),
+    ):
+        launched(machine, clock, worktree, "one", "claude")
+        send(machine.host.launch("one").hook, claude("SessionStart", source="startup"))
+        spec = side_job_ended_with_its_spawner(machine, clock, spawned, repository)
+        run("git", "branch", "x", cwd=worktree)
+        made = len(spawned.programs)
+        assert spawned.served is not None
+        asyncio.run(spawned.served.tidied())
+    commands = [each.command for each in spawned.programs[made:]]
+    removing = [each[-3:] for each in commands if each[:2] == ["podman", "run"]]
+    assert removing == [
+        ["worktree", "remove", str(spec.worktree)],
+        ["branch", "-D", "x"],
+    ]
+
+
+def test_a_side_job_s_worktree_holding_unmerged_work_stays_and_the_operator_is_told_once(
+    machine: Layout, clock: FakeClock, notices: Raised, said: list[str], tmp_path: Path
+) -> None:
+    worktree = tmp_path / "w"
+    spawnable(worktree)
+    repository = worktree / ".git"
+    spawned = SpawnsMade()
+    with inboxed(
+        machine,
+        clock,
+        notices,
+        said,
+        holding=True,
+        spawning=lambda delivery, launchers: spawned.tools(
+            delivery, machine, launchers
+        ),
+    ) as delivery:
+        launched(machine, clock, worktree, "one", "claude")
+        send(machine.host.launch("one").hook, claude("SessionStart", source="startup"))
+        spec = side_job_ended_with_its_spawner(machine, clock, spawned, repository)
+        run("git", "switch", "-q", "-c", "x", cwd=worktree)
+        (worktree / "b").write_text("b\n")
+        run("git", "add", "-A", cwd=worktree)
+        run(
+            "git",
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@example.com",
+            "commit",
+            "-q",
+            "-m",
+            "b",
+            cwd=worktree,
+        )
+        run("git", "switch", "-q", "dev", cwd=worktree)
+        made = len(spawned.programs)
+        assert spawned.served is not None
+        asyncio.run(spawned.served.tidied())
+        told = newest(delivery)
+        asyncio.run(spawned.served.tidied())
+        again = newest(delivery)
+    assert spawned.programs[made:] == []
+    assert again == told
+    item = delivery.inbox.item(told)
+    assert item.recipient == Operator()
+    assert item.reason == Message(
+        kind="note",
+        text=(
+            f"lup: `x`'s worktree, {spec.worktree}, stays, though the launch that "
+            "spawned it has ended: its branch `x` holds commits on neither `dev` "
+            "nor `dev`. It's yours to keep or remove."
+        ),
     )
 
 

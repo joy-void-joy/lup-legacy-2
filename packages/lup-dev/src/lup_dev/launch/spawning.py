@@ -76,7 +76,7 @@ line, a path or git, is held to this:
 
 import asyncio
 import secrets
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterator
 from datetime import timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, override
@@ -89,7 +89,7 @@ from lup.tools.serving import Answer
 from lup.tools.tool import Accepted, AgentTool, ToolSpec
 from lup.tools.tool import Refused as Rejected
 from lup.types import Model, MutableModel
-from lup_dev.approval import approved
+from lup_dev.approval import approved, approved_branches
 from lup_dev.git import Git, GitError, threaded
 from lup_dev.host.held import HeldLaunch, Launchers, Spawning, Starting
 from lup_dev.host.protocol import Register, Spawner, branch_name, segment
@@ -102,7 +102,8 @@ from lup_dev.launch.secrets import git_directory
 from lup_dev.layout import Layout
 from lup_dev.policy.worktrees import branch_named, made_root
 from lup_dev.stored import write_model
-from lup_ledger.parties import Conversation
+from lup_dev.trial import running_tip
+from lup_ledger.parties import Conversation, Operator
 from lup_ledger.threads import Thread
 
 if TYPE_CHECKING:
@@ -165,6 +166,18 @@ class Made(Model):
 
 class SpawnError(InboxError):
     """A spawn that can't be made, and why."""
+
+
+class SpawnedSession(Model):
+    """What the host keeps of a session an agent spawned, by its session's id (`Layout.spawned_session`): what its launcher was started with, the commit its worktree started at, and why its worktree stayed once its spawner's launch was gone, where a side job's did."""
+
+    spec: HeldLaunch
+    commit: str
+    """The commit its worktree was made at, where its branch started."""
+    stays: str | None = None
+    """Why a side job's worktree stayed once its spawner's launch was gone,
+    which the operator was told once (`SpawnTools.tidied`); none where it
+    went, or nothing was looked at yet."""
 
 
 class SpawnCall(Model, arbitrary_types_allowed=True):
@@ -460,7 +473,9 @@ class SpawnTools(MutableModel, RoomTools, arbitrary_types_allowed=True):
             raise SpawnError(message) from unsent
         write_model(
             self.layout.spawned_session(session),
-            self.launchers.specs[starting.launch],
+            SpawnedSession(
+                spec=self.launchers.specs[starting.launch], commit=made.commit
+            ),
         )
         return said(made, start, sent.number, starting.log, handed)
 
@@ -535,7 +550,7 @@ class SpawnTools(MutableModel, RoomTools, arbitrary_types_allowed=True):
             return None
         try:
             kept = self.layout.spawned_session(segment(ended.session))
-            return HeldLaunch.model_validate_json(kept.read_text())
+            return SpawnedSession.model_validate_json(kept.read_text()).spec
         except ValueError, OSError:
             return None
 
@@ -592,6 +607,151 @@ class SpawnTools(MutableModel, RoomTools, arbitrary_types_allowed=True):
             self.reserved = [
                 each for each in self.reserved if each.token != reserved.token
             ]
+
+    async def tidied(self) -> None:
+        """Remove the worktree and branch of each side job whose spawner's launch is gone, nothing running it, where its branch holds nothing beyond where it started or what's on the integration branch or the running one, and git finds nothing uncommitted in it; else keep them, and tell the operator once why, as a note from it (`SpawnedSession.stays`). The sweep runs it, apart (`Sweeping.tidy`).
+
+        By the repository's own git in a room of its own (`GitRoom`), since the
+        rooms that could run it, its spawner's and its own, are gone. Whether
+        its commits are merged is read by git pinned to the repository, in its
+        own threads, refs alone; whether anything's uncommitted, by that room's
+        `git worktree remove`, which refuses it, since `git status` on the host
+        would run the filters a room's commits pick. A record that doesn't
+        read, or a look that fails, is passed over, and the next sweep looks
+        again; what failed is said in the service's log.
+        """
+        served = self.served()
+        launches = [each.launch for each in served]
+        sessions = [
+            *(each.session for each in served),
+            *(
+                each.resume or each.session
+                for each in self.launchers.spawning(self.layout)
+            ),
+            *(each.session for each in self.reserved),
+        ]
+        records = await asyncio.to_thread(self.recorded)
+        for kept in records:
+            spec = kept.spec
+            spawner = spec.spawner
+            if (
+                spawner is None
+                or spawner.concern is not None
+                or kept.stays is not None
+                or spawner.launch in launches
+                or spec.session is None
+                or spec.session in sessions
+                or spec.repository is None
+            ):
+                continue
+            if not await asyncio.to_thread(spec.worktree.is_dir, follow_symlinks=False):
+                continue
+            try:
+                stays = await self.tidy(spec, spec.repository, kept.commit)
+            except (SpawnError, GitError) as failed:
+                self.delivery.say(
+                    f"The worktree of side job {spec.session}, {spec.worktree}, "
+                    f"wasn't looked at: {failed}"
+                )
+                continue
+            if stays is None:
+                continue
+            write_model(
+                self.layout.spawned_session(segment(spec.session)),
+                kept.model_copy(update={"stays": stays}),
+            )
+            await self.told_stays(spec, stays)
+
+    def recorded(self) -> list[SpawnedSession]:
+        """Return each spawned session's record the host keeps; one that doesn't read passed over."""
+
+        def read() -> Iterator[SpawnedSession]:
+            try:
+                paths = sorted(self.layout.spawned_sessions.glob("*.json"))
+            except OSError:
+                return
+            for path in paths:
+                try:
+                    yield SpawnedSession.model_validate_json(path.read_text())
+                except ValueError, OSError:
+                    continue
+
+        return list(read())
+
+    async def tidy(self, spec: HeldLaunch, repository: Path, commit: str) -> str | None:
+        """Remove `spec`'s worktree and its branch, a side job's started at `commit` in `repository`, where its branch is merged and nothing in it is uncommitted; return why it stays where it does, none where it went."""
+        branch = spec.worktree.name
+        if spec.worktree != made_root(repository, branch):
+            return "it isn't where lup makes a worktree, so lup leaves it"
+        git = Git.pinned(repository)
+        unmerged = await self.unmerged(git, repository, branch, commit)
+        if unmerged is not None:
+            return unmerged
+        room = self.git_room(repository)
+        try:
+            removed = await room.git(["worktree", "remove", str(spec.worktree)])
+        except GitRoomError as unrun:
+            raise SpawnError(str(unrun)) from unrun
+        if removed.status != 0:
+            said = removed.said() or f"git ended with status {removed.status}"
+            return f"git didn't remove it: {said}"
+        try:
+            await room.git(["branch", "-D", branch])
+        except GitRoomError as unrun:
+            raise SpawnError(str(unrun)) from unrun
+        return None
+
+    async def unmerged(
+        self, git: Git, repository: Path, branch: str, commit: str
+    ) -> str | None:
+        """Say what of `branch`, started at `commit`, is on neither the integration branch nor the running one, as git pinned to `repository` reads their refs, the running one where the host computes it as it computed it (`running_tip`); none where it's all there, or the branch is gone."""
+        try:
+            tip = await started_at(git, branch, self.reading)
+        except SpawnError:
+            return None
+        if tip == commit:
+            return None
+        branches = approved_branches(self.layout, repository)
+        running = running_tip(self.layout, repository)
+        heads = [
+            f"refs/heads/{branches.integration}",
+            running or f"refs/heads/{branches.running}",
+        ]
+        for head in heads:
+            found = await threaded(
+                repository,
+                git.run,
+                "merge-base",
+                "--is-ancestor",
+                "--end-of-options",
+                tip,
+                head,
+                ok=[0, 1, 128],
+                within=self.reading,
+            )
+            if found.status == 0:
+                return None
+        return (
+            f"its branch `{branch}` holds commits on neither "
+            f"`{branches.integration}` nor `{branches.running}`"
+        )
+
+    async def told_stays(self, spec: HeldLaunch, stays: str) -> None:
+        """Tell the operator once that a side job's worktree stays, though the launch that spawned it is gone, and why: a note from it, landing where it worked."""
+        session = spec.session or spec.resume
+        if session is None or spec.repository is None:
+            return
+        side = Conversation(
+            repository=spec.repository, runtime=spec.runtime, session=session
+        )
+        who = self.delivery.roster().who(side)
+        text = (
+            f"lup: {who}'s worktree, {spec.worktree}, stays, though the launch that "
+            f"spawned it has ended: {stays}. It's yours to keep or remove."
+        )
+        await self.delivery.posted(
+            Message(kind="note", text=text), side, Operator(), None
+        )
 
     async def remade(self, repository: Path, root: Path) -> None:
         """Make a spawned session's worktree, gone, again at `root`, where it was in `repository`, by the repository's own git in a room of its own (`GitRoom`), whatever room spawned it: on its branch, named as its worktree is, where that's still there, else on a new one of that name from the branch work starts from, its work having landed. Raise `SpawnError` where it can't be, saying why."""

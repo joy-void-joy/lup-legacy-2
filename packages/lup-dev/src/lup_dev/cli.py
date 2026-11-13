@@ -822,6 +822,7 @@ def host_serve(context: typer.Context) -> None:
         reap=reap,
         rewake=delivery.rewoken,
         ended=partial(side_job_ended, holders, say=typer.echo),
+        tidy=spawning.tidied,
     )
     turns = Turns()
     trying = Trying(
@@ -2427,11 +2428,13 @@ class Sweeping(MutableModel, Companion, arbitrary_types_allowed=True):
     ending: dict[str, asyncio.Task[None]] = {}
     """Each side job whose spawner's launch the service doesn't serve, by
     its launch, while its launcher is asked to end it."""
-    forgetting: timedelta = timedelta(seconds=30)
-    """How long the look at side jobs' worktrees may take (`forgot`), before
-    the sweep goes on without it."""
-    looking: asyncio.Future[None] | None = None
-    """That look, while it runs."""
+    tidy: Callable[[], Awaitable[None]] | None = None
+    """Removes the worktree of each side job whose spawner's launch is gone
+    where nothing of it would be lost, and tells the operator once of each that
+    stays (`SpawnTools.tidied`); none tidies none."""
+    tidying: asyncio.Task[None] | None = None
+    """That tidy, while it runs: each room it starts may take minutes, which
+    the sweep doesn't wait on, and none starts beside it."""
 
     @override
     async def begin(self) -> None:
@@ -2443,6 +2446,8 @@ class Sweeping(MutableModel, Companion, arbitrary_types_allowed=True):
         self.stopping.set()
         if self.task is not None:
             await self.task
+        if self.tidying is not None:
+            self.tidying.cancel()
 
     async def sweeping(self) -> None:
         """Sweep every `every`, until the service stops."""
@@ -2471,60 +2476,25 @@ class Sweeping(MutableModel, Companion, arbitrary_types_allowed=True):
         if self.reap is not None:
             await self.reap()
         await self.orphans_ended()
-        await self.forgot()
+        self.tidied()
         if self.rewake is not None:
             await self.rewake()
         self.woken()
 
-    async def forgot(self) -> None:
-        """Remove what each side job was started with whose worktree is gone (`forgotten`), in a thread, waiting `forgetting` at most: a worktree is a path a room writes, any part of which can be a link leading where a look waits. Past it, the sweep goes on, and no other look starts while that one runs, so it holds one thread at most."""
-        if self.looking is not None and not self.looking.done():
-            self.say(
-                "The look at what side jobs were started with still runs, so "
-                "none starts beside it."
-            )
+    def tidied(self) -> None:
+        """Start the tidy of side jobs' worktrees (`tidy`) apart, where none runs; where it fails, say why, with its traceback, and the next sweep starts it again."""
+        tidy = self.tidy
+        if tidy is None or (self.tidying is not None and not self.tidying.done()):
             return
-        looking = asyncio.ensure_future(asyncio.to_thread(self.forgotten))
-        self.looking = looking
-        await asyncio.wait([looking], timeout=self.forgetting.total_seconds())
-        if not looking.done():
-            self.say(
-                "The look at what side jobs were started with ran past "
-                f"{self.forgetting}: the sweep goes on without it."
-            )
 
-    def forgotten(self) -> None:
-        """Remove what each session an agent spawned was started with where its worktree is gone, so nothing resumes it again (`Layout.spawned_session`, `SpawnTools.resumed`, `SpawnTools.restarted`), or where it doesn't read, saying each; what can't be read or removed is said, and the next sweep looks again.
+        async def tidying() -> None:
+            try:
+                await tidy()
+            except Exception as failed:
+                told = "".join(traceback.format_exception(failed))
+                self.say(f"The tidy of side jobs' worktrees failed:\n{told}")
 
-        Run off the event loop, for `forgetting` at most (`forgot`): the
-        worktrees are paths a room writes. One that's a link is taken for gone,
-        never followed.
-        """
-        try:
-            kept = sorted(self.layout.spawned_sessions.glob("*.json"))
-        except OSError as unread:
-            self.say(f"What side jobs were started with wasn't looked at: {unread}")
-            return
-        for each in kept:
-            try:
-                spec = HeldLaunch.model_validate_json(each.read_text())
-                gone = not spec.worktree.is_dir(follow_symlinks=False)
-            except ValueError, OSError:
-                gone = True
-                spec = None
-            if not gone:
-                continue
-            try:
-                each.unlink(missing_ok=True)
-            except OSError as failed:
-                self.say(f"{each} wasn't removed: {failed}")
-                continue
-            why = (
-                "it didn't read"
-                if spec is None
-                else f"its worktree, {spec.worktree}, is gone"
-            )
-            self.say(f"What side job {each.stem} was started with is removed: {why}.")
+        self.tidying = asyncio.create_task(tidying())
 
     async def orphans_ended(self) -> None:
         """Ask the launcher of each side job whose spawner's launch the service doesn't serve to end it, in the background, as that launch's end does (`Launches.close`): one that registered after its spawner ended, or whose spawner's end a restart cut short, would run on for nobody, its reports reaching someone gone. Where the launches can't be listed, say so; the next sweep looks again."""
