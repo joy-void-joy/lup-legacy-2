@@ -533,13 +533,15 @@ class SpawnTools(MutableModel, RoomTools, arbitrary_types_allowed=True):
 
         It answers to the spawner it was spawned by, as recorded then, the
         concern a builder was handed kept, and runs on the arguments it was
-        spawned with.
+        spawned with; marked restarted (`Spawner.restarted`), so a side job
+        runs to its next report though its spawner's launch has ended.
         """
         spec = self.kept(ended)
         if spec is None or spec.spawner is None:
             return None
+        spawner = spec.spawner.model_copy(update={"restarted": True})
         try:
-            await self.relaunched(spec, ended, spec.spawner, spec.arguments)
+            await self.relaunched(spec, ended, spawner, spec.arguments)
         except SpawnError as refused:
             return str(refused)
         return None

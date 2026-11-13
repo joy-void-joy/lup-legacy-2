@@ -171,6 +171,7 @@ describe("parentsOf", () => {
                 launch: "one",
                 conversation: { party: "conversation" as const, repository: "/w/.git", runtime: "claude", session: "s1", agent: "a1" },
                 concern: null,
+                restarted: false,
             },
         };
         const listed = {

@@ -2984,7 +2984,7 @@ def model_named(arguments: list[str]) -> str | None:
 
 
 def orphaned(launches: list[Register]) -> list[Register]:
-    """Return each held side job among `launches` whose spawner's launch isn't among them: what ends with its spawner (`Launches.side_jobs`)."""
+    """Return each held side job among `launches` whose spawner's launch isn't among them: what ends with its spawner (`Launches.side_jobs`); not one the operator's words restarted, which runs to its next report (`Spawner.restarted`)."""
     served = {each.launch: each for each in launches}
     return [
         each
@@ -2992,6 +2992,7 @@ def orphaned(launches: list[Register]) -> list[Register]:
         if each.held
         and each.spawner is not None
         and each.spawner.concern is None
+        and not each.spawner.restarted
         and each.spawner.launch not in served
     ]
 

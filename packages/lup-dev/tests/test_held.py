@@ -1419,8 +1419,12 @@ def test_a_side_job_whose_spawner_s_launch_isn_t_served_is_orphaned_and_a_builde
     kept = held("kept").model_copy(
         update={"spawner": spawner.model_copy(update={"launch": "here"})}
     )
+    # Restarted by the operator's words, it answers them: it runs to its report.
+    answering = held("answering").model_copy(
+        update={"spawner": spawner.model_copy(update={"restarted": True})}
+    )
 
-    assert cli.orphaned([side, built, kept, held("here")]) == [side]
+    assert cli.orphaned([side, built, kept, answering, held("here")]) == [side]
 
 
 def test_the_sweep_ends_each_side_job_whose_spawner_s_launch_isn_t_served(

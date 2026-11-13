@@ -286,6 +286,11 @@ class Spawner(Model):
     """The thread handed to the spawned session with it, by its number, which it
     holds and works in, and where its reports land: a concern handed over to
     build. None for a side job, whose report comes back to its spawner."""
+    restarted: bool = False
+    """The operator's words restarted it once it had ended, as the host
+    recorded it: a side job so runs to its next report whatever became of its
+    spawner's launch, since it answers them, where one whose spawner's launch
+    ended otherwise ends with it (`orphaned`)."""
 
 
 class Behind(Model):

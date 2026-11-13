@@ -16169,9 +16169,9 @@ def test_the_operator_s_reply_restarts_an_ended_builder_held_in_its_worktree_ans
     assert restarted.resume == child.session
     assert restarted.session is None
     assert restarted.worktree == spec.worktree
-    assert restarted.spawner == spec.spawner
-    assert restarted.spawner is not None
-    assert restarted.spawner.concern is not None
+    assert spec.spawner is not None
+    assert restarted.spawner == spec.spawner.model_copy(update={"restarted": True})
+    assert spec.spawner.concern is not None
     assert restarted.arguments == ["--model", "haiku"]
     item = delivery.inbox.item(reply)
     assert item.recipient == child
