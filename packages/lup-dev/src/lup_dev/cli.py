@@ -37,7 +37,7 @@ from typer.core import TyperGroup
 
 from lup.doors import served as methods
 from lup.errors import LupError
-from lup.programs import Apart, Ran, detached
+from lup.programs import Apart, detached
 from lup.rooms import ContainerError, Mount, Podman, Room
 from lup.rooms.engine import stopped
 from lup.types import JsonObject, Model, MutableModel
@@ -246,7 +246,6 @@ from lup_dev.inbox.threaded import routes as threaded_routes
 from lup_dev.inbox.tools import InboxTools
 from lup_dev.inbox.typed import TypeReader
 from lup_dev.launch.clis import CliCache
-from lup_dev.launch.git_room import GitRoom
 from lup_dev.launch.held import Holder, Writing, untraceable
 from lup_dev.launch.hidden import removed
 from lup_dev.launch.homes import LaunchHome
@@ -3526,7 +3525,8 @@ def spawn_trial(
             "--into",
             help=(
                 "Another repository the trial's session spawns a side job in, by "
-                "the name your layer gives it with `spawn=True`."
+                "the name your layer gives it with `spawn=True`, where a session of "
+                "it runs, whose room makes the side job's worktree."
             ),
         ),
     ] = None,
@@ -3579,19 +3579,12 @@ def spawn_trial(
             ran = podman.inside(container, command)
             return TerminalRun(status=ran.status, output=ran.text())
 
-        def own_room(command: list[str], within: timedelta, waiting: timedelta) -> Ran:
-            room = GitRoom(
-                repository=scratch.repository, within=within, waiting=waiting
-            )
-            return asyncio.run(room.ran(command))
-
         trial = Trial(
             host=host_client(),
             spawn=spawning,
             terminal=terminal,
             running=running,
             inside=inside,
-            own_room=own_room,
             into=into,
             clock=SystemClock(),
             say=typer.echo,

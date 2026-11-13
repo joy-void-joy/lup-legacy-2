@@ -715,7 +715,6 @@ def played(tmp_path: Path, clock: FakeClock) -> tuple[Played, Trial]:
             each.container == container for each in host.served
         ),
         inside=inside,
-        own_room=lambda command, within, waiting: Ran(command=command, status=137),
         executing=killed,
         clock=clock,
         say=lambda _: None,
@@ -750,7 +749,6 @@ def test_the_trial_tries_each_step_and_files_what_it_saw_under_the_session(
         ("a builder outlives its spawner", True),
         ("your reply restarts the builder", True),
         ("a side job's worktree goes with its spawner", True),
-        ("a room of the repository's own ends in time", True),
         ("resumes held", True),
         ("a terminal takes it over", True),
         ("back to held", True),
@@ -758,7 +756,7 @@ def test_the_trial_tries_each_step_and_files_what_it_saw_under_the_session(
     report = written(host.items[number - 1])
     assert report.startswith(
         f"**Spawn's trial**, `lup-dev spawn trial`, in {tmp_path / 'spawn-trial-1'}: "
-        "17 of 17 steps passed."
+        "16 of 16 steps passed."
     )
     assert "**What it means:** a session lup holds with no terminal works" in report
     assert host.items[number - 1].sender == host.conversation
@@ -793,7 +791,7 @@ def test_a_trial_given_another_repository_has_its_session_spawn_a_side_job_there
     asked = [each for each in host.asked if isinstance(each, SendItem)]
     assert any("`repository` `yonder`" in each.text for each in asked)
     assert all(each.passed for each in steps), [each.seen for each in steps]
-    assert len(steps) == 18
+    assert len(steps) == 17
 
 
 def test_a_trial_whose_session_never_starts_says_so_and_files_it_anyway(
@@ -811,7 +809,7 @@ def test_a_trial_whose_session_never_starts_says_so_and_files_it_anyway(
 
     assert [(each.name, each.passed) for each in steps] == [("held", False)]
     report = written(host.items[number - 1])
-    assert "0 of 17 steps passed." in report
+    assert "0 of 16 steps passed." in report
     assert (
         "- **held**, failed in 0 s: the launcher of launch h1 ended before its "
         "session was up"
@@ -822,8 +820,8 @@ def test_a_trial_whose_session_never_starts_says_so_and_files_it_anyway(
         "a room's command is stopped in time, interrupts, survives a restart, "
         "spawns a side job, resumes its side job, hands a concern over, ends, a "
         "builder outlives its spawner, your reply restarts the builder, a side job's "
-        "worktree goes with its spawner, a room of the repository's own ends in "
-        "time, resumes held, a terminal takes it over, back to held."
+        "worktree goes with its spawner, resumes held, a terminal takes it over, back "
+        "to held."
     ) in report
     sender = host.items[number - 1].sender
     assert isinstance(sender, Conversation)

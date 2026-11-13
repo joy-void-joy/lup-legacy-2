@@ -14393,7 +14393,6 @@ class SpawnsMade:
         hung: bool = False,
         stuck: bool = False,
         missing: bool = False,
-        built: bool = True,
         **fields: object,
     ) -> None:
         self.limit = limit
@@ -14404,9 +14403,6 @@ class SpawnsMade:
         """Whether the room's `git worktree add` alone never ends."""
         self.missing = missing
         """Whether each launcher can't be started, as where `lup-dev` is gone."""
-        self.built = built
-        """Whether podman lists a room image of each repository, which a room of
-        its own for its git runs: `old1`, then `new2`, built after it."""
         self.fields = fields
         """The tool's other fields, as the test sets them."""
         self.programs: list[Program] = []
@@ -14425,23 +14421,6 @@ class SpawnsMade:
             """Answer `program` as `executed` would: one that never ends killed past its `within`, with status 124."""
             self.programs.append(program)
             self.running.set()
-            if program.command[:2] == ["podman", "images"]:
-                images = [
-                    {
-                        "Id": "old1",
-                        "Created": "2026-10-01T00:00:00Z",
-                        "Size": 1,
-                        "Containers": 0,
-                    },
-                    {
-                        "Id": "new2",
-                        "Created": "2026-10-02T00:00:00Z",
-                        "Size": 1,
-                        "Containers": 0,
-                    },
-                ]
-                listed = json.dumps(images if self.built else []).encode()
-                return Ran(command=program.command, status=0, output=listed)
             if self.hung or (self.stuck and "add" in program.command):
                 with contextlib.suppress(TimeoutError):
                     async with asyncio.timeout(program.within.total_seconds()):
@@ -15806,7 +15785,7 @@ def kept_approval(
 def test_a_spawn_in_another_repository_the_approval_lets_it_is_made_there_by_that_repository_s_own_git(
     machine: Layout, clock: FakeClock, notices: Raised, said: list[str], tmp_path: Path
 ) -> None:
-    """Its worktree is made by a room of that repository's own, from its own branch, its concern a new one at that repository's top, the session spawned holding it, its brief from the spawner."""
+    """Its worktree is made by that repository's own git in a room of it that runs, from its own branch, its concern a new one at that repository's top, the session spawned holding it, its brief from the spawner."""
     worktree, yonder = tmp_path / "w", tmp_path / "yonder"
     spawnable(worktree)
     theirs = spawnable(yonder)
@@ -15824,6 +15803,7 @@ def test_a_spawn_in_another_repository_the_approval_lets_it_is_made_there_by_tha
         ),
     ) as delivery:
         launched(machine, clock, worktree, "one", "claude")
+        launched(machine, clock, yonder, "two", "claude")
         hook, mcp = machine.host.launch("one").hook, machine.host.launch("one").mcp
         send(hook, claude("SessionStart", source="startup"))
         answer, error = call(
@@ -15840,14 +15820,19 @@ def test_a_spawn_in_another_repository_the_approval_lets_it_is_made_there_by_tha
         handed = delivery.concerns().found(other, "tabs-break")
     root = other / "tree" / "fix-tabs"
     spawner = Conversation(repository=repository, runtime="claude", session="s1")
-    [listing, adding] = spawned.programs
+    [adding] = spawned.programs
     [launch] = spawned.launches
     assert launch.session is not None
     child = Conversation(repository=other, runtime="claude", session=launch.session)
     assert not error, answer
-    assert f"label=lup.project={other}" in listing.command
-    assert "exec" not in adding.command
-    assert adding.command[-10:] == [
+    # A room of that repository's makes it, never the spawner's, which can't
+    # reach it, nor one started for it.
+    assert adding.command == [
+        "podman",
+        "exec",
+        "--workdir",
+        str(other),
+        "lup-two",
         "git",
         "--git-dir",
         str(other),
@@ -15871,6 +15856,42 @@ def test_a_spawn_in_another_repository_the_approval_lets_it_is_made_there_by_tha
     ).model_dump(exclude={"launch", "session"})
     item = delivery.inbox.item(brief)
     assert (item.sender, item.recipient) == (spawner, child)
+
+
+def test_a_spawn_in_another_repository_where_no_session_of_it_runs_is_refused(
+    machine: Layout, clock: FakeClock, notices: Raised, said: list[str], tmp_path: Path
+) -> None:
+    """Only a room of it that runs makes its worktree: nothing is started for it."""
+    worktree, yonder = tmp_path / "w", tmp_path / "yonder"
+    spawnable(worktree)
+    spawnable(yonder)
+    repository, other = worktree / ".git", yonder / ".git"
+    kept_approval(machine, repository, [Spawnable(name="yonder", path=yonder)])
+    kept_approval(machine, other)
+    spawned = SpawnsMade()
+    with inboxed(
+        machine,
+        clock,
+        notices,
+        said,
+        spawning=lambda delivery, launchers: spawned.tools(
+            delivery, machine, launchers
+        ),
+    ):
+        launched(machine, clock, worktree, "one", "claude")
+        hook, mcp = machine.host.launch("one").hook, machine.host.launch("one").mcp
+        send(hook, claude("SessionStart", source="startup"))
+        answer, _ = call(
+            mcp,
+            "spawn",
+            {"name": "fix tabs", "brief": "Fix the tabs.", "repository": "yonder"},
+        )
+    assert answer == (
+        "Not spawned: no session of that repository runs, whose room would run its "
+        "git: one launched there does"
+    )
+    assert spawned.programs == []
+    assert spawned.launches == []
 
 
 @pytest.mark.parametrize(
@@ -16065,12 +16086,20 @@ def test_a_side_job_s_worktree_goes_with_its_branch_once_its_spawner_s_launch_ha
         run("git", "branch", "x", cwd=worktree)
         made = len(spawned.programs)
         assert spawned.served is not None
+        # No room of the repository runs: nothing's done, and nothing's kept
+        # as done, for a sweep that finds one.
         asyncio.run(spawned.served.tidied())
-    commands = [each.command for each in spawned.programs[made:]]
-    removing = [each[-3:] for each in commands if each[:2] == ["podman", "run"]]
-    assert removing == [
-        ["worktree", "remove", str(spec.worktree)],
-        ["branch", "-D", "x"],
+        waited = spawned.programs[made:]
+        launched(
+            machine, clock, tmp_path / "three", "three", "claude", repository=repository
+        )
+        asyncio.run(spawned.served.tidied())
+    assert waited == []
+    room = ["podman", "exec", "--workdir", str(repository), "lup-three"]
+    git = ["git", "--git-dir", str(repository)]
+    assert [each.command for each in spawned.programs[made:]] == [
+        [*room, *git, "worktree", "remove", str(spec.worktree)],
+        [*room, *git, "branch", "-D", "x"],
     ]
 
 
@@ -16247,10 +16276,10 @@ def test_a_spawner_s_send_resumes_an_ended_builder_keeping_the_concern_it_handed
     )
 
 
-def test_a_restart_makes_a_worktree_gone_again_where_it_was_in_a_room_of_the_repository_s_own(
+def test_a_restart_makes_a_worktree_gone_again_where_it_was_in_a_room_of_the_repository_that_runs(
     machine: Layout, clock: FakeClock, notices: Raised, said: list[str], tmp_path: Path
 ) -> None:
-    """Landed and cleaned up, or removed with its spawner: its runtime files its record by the worktree's path, so it's made there again, on a branch of its name from the branch work starts from where its own is gone, by the repository's git in a room started for it from its latest image."""
+    """Landed and cleaned up, or removed with its spawner: its runtime files its record by the worktree's path, so it's made there again, on a branch of its name from the branch work starts from where its own is gone, by the repository's git in a room of it that runs."""
     worktree = tmp_path / "w"
     commit = spawnable(worktree)
     repository = worktree / ".git"
@@ -16273,25 +16302,13 @@ def test_a_restart_makes_a_worktree_gone_again_where_it_was_in_a_room_of_the_rep
         made = len(spawned.programs)
         inbox("answer", str(ending), "--comment", "The keys too.")
     [_, restarted] = spawned.launches
-    listing, pruning, _, adding = spawned.programs[made:]
-    assert listing.command[:2] == ["podman", "images"]
-    *walls, image, git, gitdir, place, worktrees, prune = pruning.command
-    pruned = [worktrees, prune]
-    assert walls[:2] == ["podman", "run"]
-    assert "--network=none" in walls
-    assert f"--mount=type=bind,source={repository},destination={repository}" in walls
-    assert (
-        f"--mount=type=bind,source={repository / 'config'},"
-        f"destination={repository / 'config'},ro=true"
-    ) in walls
-    assert (image, git, gitdir, place, pruned) == (
-        "new2",
-        "git",
-        "--git-dir",
-        str(repository),
-        ["worktree", "prune"],
-    )
-    assert adding.command[-7:] == [
+    pruning, adding = spawned.programs[made:]
+    room = ["podman", "exec", "--workdir", str(repository), "lup-one"]
+    git = ["git", "--git-dir", str(repository)]
+    assert pruning.command == [*room, *git, "worktree", "prune"]
+    assert adding.command == [
+        *room,
+        *git,
         "worktree",
         "add",
         "--quiet",
@@ -16311,7 +16328,7 @@ def test_the_operator_s_reply_to_an_ended_builder_it_can_t_restart_is_said_to_th
     worktree = tmp_path / "w"
     spawnable(worktree)
     repository = worktree / ".git"
-    spawned = SpawnsMade(built=False)
+    spawned = SpawnsMade()
     with inboxed(
         machine,
         clock,
@@ -16327,6 +16344,7 @@ def test_the_operator_s_reply_to_an_ended_builder_it_can_t_restart_is_said_to_th
         spec, child, ending = builder_ended(
             machine, clock, delivery, spawned, repository, kept=False
         )
+        client(machine.host, clock).unregister("one")
         inbox("answer", str(ending), "--comment", "The keys too.")
         reply, problem = numbers(delivery)[-2:]
     assert len(spawned.launches) == 1
@@ -16336,9 +16354,8 @@ def test_the_operator_s_reply_to_an_ended_builder_it_can_t_restart_is_said_to_th
         kind="problem",
         text=(
             f"lup: `x` had ended, and your words in @{reply} didn't restart them: "
-            f"its worktree, {spec.worktree}, is gone, and can't be made again: no "
-            f"room image of {repository} is built, which its git runs in: a launch "
-            "there builds one."
+            f"its worktree, {spec.worktree}, is gone, and no session of its "
+            "repository runs, whose room would make it again."
         ),
     )
 

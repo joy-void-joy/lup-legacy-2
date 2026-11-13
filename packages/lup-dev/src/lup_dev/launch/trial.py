@@ -37,8 +37,8 @@ would mean:
    its turn's end reaches the operator, who talks with it directly, and the
    session hears nothing of it;
 10. **spawns in another repository,** where the trial is given one
-   (`--into`): asked to, the session spawns a side job there, held in a
-   worktree that repository's own git made in a room of its own, its report
+   (`--into`) and a session of it runs: asked to, the session spawns a side job there, held in a
+   worktree that repository's own git made in a room of it that runs, its report
    reaching the session across repositories, and ending there;
 11. **ends:** the host ends the session and its room;
 12. **a builder outlives its spawner:** the one handed a concern runs on once
@@ -47,16 +47,13 @@ would mean:
    restarts it held, with all it knew, and it answers;
 14. **a side job's worktree goes with its spawner:** the session's side job,
    whose branch holds nothing of its own, has its worktree removed by the
-   sweep once the launch that spawned it ended;
-15. **a room of the repository's own ends in time:** a command that never ends,
-   run in a room started for it as the host service runs a repository's git
-   where no session's room is there, is ended by podman's own monitor past its
-   limit (`--timeout`), before the service's wait on it runs out;
-16. **resumes held:** the session resumes held, its conversation kept;
-17. **a terminal takes it over:** a terminal launch resuming it finds it held,
+   sweep, in the restarted builder's room, once the launch that spawned it
+   ended;
+15. **resumes held:** the session resumes held, its conversation kept;
+16. **a terminal takes it over:** a terminal launch resuming it finds it held,
    ends it (`--take-over`, asking nothing and answering nothing), and runs a
    turn of its own on it;
-18. **back to held:** held again, it has the terminal's turn in its record.
+17. **back to held:** held again, it has the terminal's turn in its record.
 
 What it doesn't try: the runtime with no held session yet, holds of hours, a
 dashboard's own clicks, a real interactive terminal (its turn runs with `-p`,
@@ -145,11 +142,6 @@ class Trial(MutableModel, arbitrary_types_allowed=True):
     inside: Callable[[str, list[str]], TerminalRun]
     """Runs a command in the container named, as one of the room's own
     processes (`Podman.inside`), and returns how it ran."""
-    own_room: Callable[[list[str], timedelta, timedelta], Ran]
-    """Runs a command in a room of the repository's own, as the host service
-    runs a repository's git where no session's room is there (`GitRoom.ran`),
-    ended by podman's monitor past the first limit given, the service's wait on
-    it past the second more, and returns how it ended."""
     into: str | None = None
     """Another repository the trial's session spawns a side job in, by the name
     its declaration gives it (`--into`); none tries no such spawn."""
@@ -303,6 +295,9 @@ print(len(found))
     """The session the trial's session handed a concern, once it's served."""
     builder_party: Conversation | None = None
     """The builder's own conversation, as the inbox knows it, once it's heard."""
+    builder_again: Register | None = None
+    """The builder's launch the operator's reply restarted, while it runs: the
+    room of the repository the sweep's tidy runs its git in."""
     spawned: list[Register] = []
     """Each launch the trial's session spawned, whose worktree and branch go
     with the trial's own."""
@@ -403,7 +398,7 @@ print(len(found))
                         meaning=(
                             "a session can't spawn in another repository its "
                             "approval lets it: what lets it, the worktree that "
-                            "repository's own git makes in a room of its own, or "
+                            "repository's own git makes in a room of it that runs, or "
                             "the report's way back across repositories"
                         ),
                         tried=self.spawned_elsewhere,
@@ -438,18 +433,9 @@ print(len(found))
                 meaning=(
                     "a side job's worktree with nothing of its own on its branch "
                     "stays once the launch that spawned it ended: the sweep's tidy, "
-                    "or the room of the repository's own that removes it, is broken"
+                    "or the room of the repository's it runs git in, is broken"
                 ),
                 tried=self.side_job_tidied,
-            ),
-            Stage(
-                name="a room of the repository's own ends in time",
-                meaning=(
-                    "podman's monitor doesn't end a room the host service starts "
-                    "for a repository's git past its limit (`--timeout`): only the "
-                    "service's own wait on it, and its removal by name, end it"
-                ),
-                tried=self.own_room_stopped,
             ),
             Stage(
                 name="resumes held",
@@ -890,40 +876,27 @@ print(len(found))
             lambda: self.said_by(party, "FIG", after=reply.number) is not None,
             f"no answer of theirs holding FIG came within {self.patience}",
         )
-        self.end(restarted)
+        self.builder_again = restarted
         return (
             f"Your reply, @{reply.number}, restarted `{builder.name}` held, as launch "
-            f"{restarted.launch}; it answered with the word it first answered, and "
-            "the trial ended it."
+            f"{restarted.launch}; it answered with the word it first answered."
         )
 
     def side_job_tidied(self) -> str:
-        """See the session's side job's worktree removed once the launch that spawned it ended: its branch holds nothing of its own."""
-        side = self.side
-        if side is None:
-            message = "the session spawned no side job"
+        """See the session's side job's worktree removed once the launch that spawned it ended, its branch holding nothing of its own, by the repository's git in the restarted builder's room, the one of it that runs; then end the builder."""
+        side, restarted = self.side, self.builder_again
+        if side is None or restarted is None:
+            message = "the session spawned no side job, or no builder was restarted"
             raise TrialError(message)
         self.until(
             lambda: not side.worktree.exists(),
             f"its worktree, {side.worktree}, stayed {self.patience} after the launch "
-            "that spawned it ended",
+            "that spawned it ended, the restarted builder's room running",
         )
-        return f"Its worktree, {side.worktree}, went once the session's launch ended."
-
-    def own_room_stopped(self) -> str:
-        """Run a command that never ends in a room of the repository's own, and see podman's monitor end it past its limit, before the service's wait on it runs out."""
-        began = self.clock.now()
-        ran = self.own_room(["sleep", "3599"], self.stopping, self.stopped)
-        took = self.clock.now() - began
-        if ran.status == 124:
-            message = (
-                f"the service's wait on it ran out, after {spelled(took)}, and it was "
-                "removed by its name: podman's monitor didn't end it past its limit"
-            )
-            raise TrialError(message)
+        self.end(restarted)
         return (
-            f"podman's monitor ended it after {spelled(took)}, with status "
-            f"{ran.status}, before the service's wait ran out."
+            f"Its worktree, {side.worktree}, went once the session's launch ended, "
+            "and the trial ended the restarted builder."
         )
 
     def spawned_elsewhere(self) -> str:
@@ -1273,8 +1246,7 @@ print(len(found))
                 "resumes it with a `send`, hands a concern over to one you "
                 "talk with directly, which outlives it and which your reply "
                 "restarts once it ended, ends, tidies its side job's worktree, "
-                "resumes, and passes to a terminal and back; a room of the "
-                "repository's own ends in time. A launch's setup "
+                "resumes, and passes to a terminal and back. A launch's setup "
                 f"took {spelled(self.steps[0].took)}. Not tried here: the other "
                 "runtime, holds of hours, and an interactive terminal."
             )

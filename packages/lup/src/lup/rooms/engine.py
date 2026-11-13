@@ -2,10 +2,8 @@
 
 A run is in the foreground (`run`), or beside the caller's event loop with no
 terminal and no input, its caller reaching its program some other way, as a held
-session's over a socket (`held`), or one program of an image built already,
-with no network and no home, which its caller runs (`once`); each is removed
-when it exits, and every run is walled the same way (`walls`; `docs/launch.md`,
-*The user, the process, the network*):
+session's over a socket (`held`); either is removed when it exits, and every run
+is walled the same way (`docs/launch.md`, *The user, the process, the network*):
 - `--userns=keep-id`: the operator's uid inside, so what the agent writes is
   theirs on the host;
 - `--init`, which reaps exited processes: without it the first lup piled up 4,045
@@ -57,11 +55,6 @@ any state, running included, freeing its old name (`podman-rename(1)`).
 `podman stop --ignore --time=N` asks a container's program to end, makes it to
 past N seconds, and answers 0 for a name no container has (`podman-stop(1)`).
 
-`podman run --timeout=N` has the container's monitor, conmon, kill it past N
-seconds (`podman-run(1)`), so a run started `once` ends in time though the
-podman that started it was killed first; read in its man page, and tried by
-`lup-dev spawn trial`.
-
 A container a run created and never started stays, `created`, holding its
 name: a launch that took the host down before its container started left two,
 which the next launch's run met as "the container name … is already in use"
@@ -72,7 +65,6 @@ and its `State`, `created` for that one.
 import asyncio
 import csv
 import io
-import math
 import tempfile
 from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Callable
@@ -351,39 +343,6 @@ def mount_option(fields: list[str]) -> str:
     return record.getvalue()
 
 
-def mounted(mount: Mount | Mask) -> str:
-    """Return podman's `--mount` value for `mount`: a bind mount, or a mask's tmpfs."""
-    match mount:
-        case Mount(read_only=read_only, receives=receives):
-            fields = [
-                "type=bind",
-                f"source={mount.source}",
-                f"destination={mount.destination}",
-                *(["ro=true"] if read_only else []),
-                *(["bind-propagation=rslave"] if receives else []),
-            ]
-            return mount_option(fields)
-        case Mask(target=target):
-            return mount_option(["type=tmpfs", f"destination={target}", "notmpcopyup"])
-
-
-class Once(Model):
-    """One program run in a container of an image podman holds already, walled as a room is, with no network, no terminal and no home: what a room's own program does where no room of it runs, removed once it ends."""
-
-    image: str
-    """The image, by its id or a tag podman holds: never built for the run."""
-    mounts: list[Mount] = []
-    env: dict[str, str] = {}
-    workdir: AbsolutePath
-    command: list[str]
-    name: str
-    """The container's name while it runs, by which whoever started it removes
-    it where its wait was given up."""
-    within: timedelta
-    """The longest it may run, past which podman's own monitor kills it, whether
-    or not the podman that started it is still there (`--timeout`)."""
-
-
 class Podman(Model, ContainerEngine):
     """Runs containers with rootless podman."""
 
@@ -441,23 +400,27 @@ class Podman(Model, ContainerEngine):
             raise ContainerError(message)
         return True
 
-    def walls(self) -> list[str]:
-        """Return the options walling every run, after `podman run`: removed as it exits, its exited processes reaped, never pulling an image, logging nothing, the operator's uid inside, no capability, no new privilege, and its processes held to `pids_limit`."""
-        return [
-            "--rm",
-            "--init",
-            "--pull=never",
-            "--log-driver=none",
-            "--userns=keep-id",
-            "--cap-drop=all",
-            "--security-opt=no-new-privileges",
-            f"--pids-limit={self.pids_limit}",
-        ]
-
     def command(self, invocation: Invocation) -> list[str]:
         """Return the command line that runs the invocation's container."""
         container = invocation.container
         home = invocation.home
+
+        def option(mount: Mount | Mask) -> str:
+            match mount:
+                case Mount(read_only=read_only, receives=receives):
+                    fields = [
+                        "type=bind",
+                        f"source={mount.source}",
+                        f"destination={mount.destination}",
+                        *(["ro=true"] if read_only else []),
+                        *(["bind-propagation=rslave"] if receives else []),
+                    ]
+                    return mount_option(fields)
+                case Mask(target=target):
+                    return mount_option(
+                        ["type=tmpfs", f"destination={target}", "notmpcopyup"]
+                    )
+
         terminal = (
             ["--interactive", "--tty", "--detach-keys="] if invocation.terminal else []
         )
@@ -467,7 +430,14 @@ class Podman(Model, ContainerEngine):
         return [
             self.program,
             "run",
-            *self.walls(),
+            "--rm",
+            "--init",
+            "--pull=never",
+            "--log-driver=none",
+            "--userns=keep-id",
+            "--cap-drop=all",
+            "--security-opt=no-new-privileges",
+            f"--pids-limit={self.pids_limit}",
             *named,
             *terminal,
             f"--network={network}",
@@ -481,36 +451,9 @@ class Podman(Model, ContainerEngine):
                     f"destination={home}",
                 ]
             ),
-            *(f"--mount={mounted(mount)}" for mount in container.mounts),
+            *(f"--mount={option(mount)}" for mount in container.mounts),
             container.image.tag,
             *invocation.command,
-        ]
-
-    def once(self, run: Once) -> list[str]:
-        """Return the command line that runs `run`'s program in a container of its own, walled as every run is (`walls`), on no network, killed by podman's own monitor past its `within`, whole seconds rounded up.
-
-        >>> from datetime import timedelta
-        >>> from pathlib import Path
-        >>> Podman().once(Once(
-        ...     image="abc123", workdir=Path("/r"), command=["git", "status"],
-        ...     name="lup-git-1", within=timedelta(seconds=1.5),
-        ...     mounts=[Mount(source=Path("/r"))], env={"A": "b"},
-        ... ))[-9:]
-        ['--name=lup-git-1', '--network=none', '--timeout=2', '--workdir=/r', '--env=A=b', '--mount=type=bind,source=/r,destination=/r', 'abc123', 'git', 'status']
-        """
-        seconds = math.ceil(run.within.total_seconds())
-        return [
-            self.program,
-            "run",
-            *self.walls(),
-            f"--name={run.name}",
-            "--network=none",
-            f"--timeout={seconds}",
-            f"--workdir={run.workdir}",
-            *(f"--env={name}={value}" for name, value in run.env.items()),
-            *(f"--mount={mounted(mount)}" for mount in run.mounts),
-            run.image,
-            *run.command,
         ]
 
     @override
