@@ -15020,9 +15020,46 @@ def test_a_ref_the_room_made_a_pipe_stops_its_spawn_and_holds_nothing_else_of_th
             answer, _ = spawning.result(timeout=60)
     assert pending
     assert meanwhile == ""
-    assert answer.startswith("Not spawned: `stuck` couldn't be read: git rev-parse")
-    assert "ran past 3 s in" in answer
-    assert "and was stopped" in answer
+    assert answer == (
+        "Not spawned: `stuck` couldn't be read; what git said is in the host "
+        "service's log"
+    )
+    [logged] = [each for each in said if "a spawn was refused" in each]
+    assert "ran past 3 s in" in logged
+    assert spawned.programs == []
+
+
+def test_what_host_git_says_reading_a_spawn_s_refs_never_reaches_the_room(
+    machine: Layout, clock: FakeClock, notices: Raised, said: list[str], tmp_path: Path
+) -> None:
+    """A room writes its git directory, so `packed-refs` can be a link to any file the operator can read, whose line git quotes where it chokes on it: the service's log keeps it, the room is told none of it."""
+    worktree = tmp_path / "w"
+    spawnable(worktree)
+    secret = tmp_path / "credentials"
+    secret.write_text("https://someone:hunter2@github.example\n")
+    packed = worktree / ".git" / "packed-refs"
+    packed.unlink(missing_ok=True)
+    packed.symlink_to(secret)
+    spawned = SpawnsMade()
+    with inboxed(
+        machine,
+        clock,
+        notices,
+        said,
+        spawning=lambda delivery, launchers: spawned.tools(
+            delivery, machine, launchers
+        ),
+    ):
+        launched(machine, clock, worktree, "one", "claude")
+        hook, mcp = machine.host.launch("one").hook, machine.host.launch("one").mcp
+        send(hook, claude("SessionStart", source="startup"))
+        answer, _ = call(mcp, "spawn", {"name": "x", "brief": "Do it.", "start": "zzz"})
+    assert answer == (
+        "Not spawned: `zzz` couldn't be read; what git said is in the host "
+        "service's log"
+    )
+    [logged] = [each for each in said if "a spawn was refused" in each]
+    assert "hunter2" in logged
     assert spawned.programs == []
 
 

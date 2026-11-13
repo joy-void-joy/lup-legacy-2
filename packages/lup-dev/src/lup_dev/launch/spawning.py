@@ -215,6 +215,13 @@ class SpawnCall(Model, arbitrary_types_allowed=True):
         try:
             return await self.tools.spawned(self, spawn)
         except InboxError as refused:
+            if refused.__cause__ is not None:
+                # What the host's git said stays with the operator: it can quote
+                # a file a link the room planted leads to.
+                self.tools.delivery.say(
+                    f"{self.launch.launch}: a spawn was refused, {refused}: "
+                    f"{refused.__cause__}"
+                )
             return f"Not spawned: {refused}"
 
     def tools_bound(self) -> list[AgentTool]:
@@ -1080,7 +1087,11 @@ async def started_at(git: Git, start: str, within: timedelta) -> str:
             within=within,
         )
     except GitError as unread:
-        message = f"`{start}` couldn't be read: {unread}"
+        # Not what git said: it reads what links a room planted lead to, any
+        # file of the operator's among it, and quotes the line it choked on.
+        message = (
+            f"`{start}` couldn't be read; what git said is in the host service's log"
+        )
         raise SpawnError(message) from unread
     commit = found.output.decode().strip()
     if found.status != 0 or not commit:
@@ -1102,7 +1113,11 @@ async def branches(git: Git, wanted: str, within: timedelta) -> list[str]:
             within=within,
         )
     except GitError as unread:
-        message = f"the branches named `{wanted}` couldn't be read: {unread}"
+        # Not what git said, as `started_at` keeps it.
+        message = (
+            f"the branches named `{wanted}` couldn't be read; what git said is in "
+            "the host service's log"
+        )
         raise SpawnError(message) from unread
     return found.output.decode().splitlines()
 
