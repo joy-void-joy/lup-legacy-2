@@ -20,7 +20,6 @@ import time
 from concurrent.futures import Future, ThreadPoolExecutor, wait
 from contextlib import asynccontextmanager, contextmanager
 from datetime import UTC, datetime, timedelta
-from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, NamedTuple, override
 
@@ -46,6 +45,7 @@ from lup.programs import detached as started_apart
 from lup.rooms import Podman
 from lup.tools.serving import Answer as ToolAnswer
 from lup.tools.speaking import SPEAKING
+from lup.types import Model
 from lup_dev import Core, Levels, Modules, Paths, Project, cli, commanding
 from lup_dev.adapters.claude import (
     ChannelMessage,
@@ -109,6 +109,7 @@ from lup_dev.inbox.conversion import converted
 from lup_dev.inbox.delivery import (
     SEPARATOR,
     Delivery,
+    HoldAnswering,
     Waking,
     clocked,
 )
@@ -219,7 +220,7 @@ from lup_dev.inbox.threads import spoken
 from lup_dev.inbox.tools import Reach, Speaker, specs
 from lup_dev.inbox.typed import TypeReader
 from lup_dev.launch.room import RoomError
-from lup_dev.launch.spawning import SpawnTools, spawnable_in
+from lup_dev.launch.spawning import Respawns, SpawnTools
 from lup_dev.layout import CopyLayout, GitDirectoryLayout, InboxLayout, Layout
 from lup_dev.merging import Merging, gated_commit, merged
 from lup_dev.policy import landing as landing_module
@@ -577,9 +578,7 @@ def inboxed(
         if spawning is None
         else spawning(delivery, launchers)
     )
-    delivery.resumer = spawner.resumed
-    delivery.restarter = spawner.restarted
-    delivery.elsewhere = partial(spawnable_in, machine)
+    delivery.respawning = Respawns(tools=spawner)
     landing = LandingTools(
         delivery=delivery,
         layout=judging or machine,
@@ -742,6 +741,27 @@ def context(answer: str) -> str:
     if "sessions call you. Once you know" not in told.partition("\n\n")[0]:
         return told
     return told.partition("\n\n")[2]
+
+
+class HoldsWritten(Model, HoldAnswering):
+    """The operator's answers to held changes written as the host writes them where `layout` is given, else nowhere; nothing told of one nobody heard."""
+
+    layout: Layout | None = None
+
+    @override
+    def answered(
+        self, change: HeldChange, repository: Path, *, approved: bool, said: str
+    ) -> str | None:
+        if self.layout is None:
+            return None
+        return cli.hold_answered(
+            self.layout, change, repository, approved=approved, comment=said
+        )
+
+    @override
+    def unheard(self, change: HeldChange) -> str | None:
+        del change
+        return None
 
 
 def inbox(*arguments: str) -> str:
@@ -6643,11 +6663,7 @@ def test_a_hold_is_an_inbox_item_and_its_answer_reaches_the_hold(
     )
     whole = ChangedFile(path=Path("src/new.py"), before=None, after=Text(text="new\n"))
     with inboxed(machine, clock, notices, said) as delivery:
-        delivery.settle_hold = lambda change, repository, approved, comment: (
-            cli.hold_answered(
-                machine, change, repository, approved=approved, comment=comment
-            )
-        )
+        delivery.hold_answering = HoldsWritten(layout=machine)
         InboxAnnouncing(layout=machine.host, clock=clock).announced(
             hold.model_copy(update={"call": "t7", "agent": "sub"}),
             "claude",
@@ -6732,11 +6748,7 @@ def judged_in_its_process(
         judge=WorkerJudge(modules=workers),
         modules=workers,
     ) as delivery:
-        delivery.settle_hold = lambda change, repository, approved, comment: (
-            cli.hold_answered(
-                machine, change, repository, approved=approved, comment=comment
-            )
-        )
+        delivery.hold_answering = HoldsWritten(layout=machine)
         launch = Register(
             launch="one",
             runtime=runtime,
@@ -7247,12 +7259,7 @@ def noted_hold(
 
 def answering_holds(machine: Layout, delivery: Watched) -> None:
     """Have `delivery` write each held change's answer to its hold, and say what nothing told, as `lup-dev host`'s does."""
-    delivery.settle_hold = lambda change, repository, approved, comment: (
-        cli.hold_answered(
-            machine, change, repository, approved=approved, comment=comment
-        )
-    )
-    delivery.hold_unheard = lambda change: cli.hold_unheard(machine, change)
+    delivery.hold_answering = cli.HeldAnswers(layout=machine)
 
 
 GONE = (
@@ -9267,11 +9274,7 @@ def test_a_sent_draft_approves_what_it_marks_read_and_held_changes_commented_on(
         )
     )
     with inboxed(machine, clock, notices, said) as delivery:
-        delivery.settle_hold = lambda change, repository, approved, comment: (
-            cli.hold_answered(
-                machine, change, repository, approved=approved, comment=comment
-            )
-        )
+        delivery.hold_answering = HoldsWritten(layout=machine)
         host = HostClient(layout=machine.host, clock=clock, starter=Unstarted())
         read = host.ask(asking_approval(tmp_path / "r", "zone"), Shown).item
         pushed = host.ask(asking_approval(tmp_path / "p", "zone", pusher), Shown).item
@@ -10506,7 +10509,7 @@ def serving_landings(
     ):
         landings.launched("claude")
         send(machine.host.launch("one").hook, started("claude"))
-        delivery.settle_hold = lambda _change, _repository, _approved, _comment: None
+        delivery.hold_answering = HoldsWritten()
         yield delivery, pool
 
 
@@ -10909,7 +10912,7 @@ def test_an_ignore_approved_at_that_version_isn_t_asked_again_at_its_landing(
     ) as delivery:
         landings.launched("claude")
         send(machine.host.launch("one").hook, started("claude"))
-        delivery.settle_hold = lambda _change, _repository, _approved, _comment: None
+        delivery.hold_answering = HoldsWritten()
         number = hold_on(landings, machine, clock, path, IGNORING)
         inbox("answer", str(number), "--approve", "--comment", "")
         answer, error = call(machine.host.launch("one").mcp, "land", {})
@@ -15764,11 +15767,8 @@ def test_a_side_job_ends_at_its_report_and_its_spawner_s_send_resumes_it(
     assert resumed.resume == child.session
     assert resumed.worktree == made
     assert resumed.spawner == spec.spawner
-    assert answer.endswith(
-        f"It ended at its report: it's resumed held in {made}, with all it knew, "
-        "your message its first turn once it's up; its launcher writes to "
-        f"{machine.launch(resumed.launch).log}."
-    )
+    # Restarted as anything that would wake it does: `send` says how it's told.
+    assert answer.startswith("Your message is in the inbox of your subagent `x`")
 
 
 def kept_approval(
@@ -16216,11 +16216,7 @@ def test_a_spawner_s_send_resumes_an_ended_builder_keeping_the_concern_it_handed
     [_, resumed] = spawned.launches
     assert resumed.resume == child.session
     assert resumed.spawner == spec.spawner
-    assert answer.endswith(
-        f"It had ended: it's resumed held in {spec.worktree}, with all it knew, "
-        "your message its first turn once it's up; its launcher writes to "
-        f"{machine.launch(resumed.launch).log}."
-    )
+    assert answer.startswith("Your message is in the inbox of your subagent `x`")
 
 
 def test_a_spawner_s_send_makes_its_ended_builder_s_worktree_gone_again_in_its_own_room(

@@ -1123,7 +1123,7 @@ class Layout(Model):
         return LaunchLayout(directory=self.launches / launch)
 
     def spawned_session(self, session: str) -> Path:
-        """Say where what a session an agent spawned was started with is kept, by its session's id, which lup minted: what resumes it, its context kept, once it ended, a side job at its report and a builder when the operator ended it, and its spawner sends it more (`SpawnTools.resumed`) or the operator's words reach it (`SpawnTools.restarted`)."""
+        """Say where what a session an agent spawned was started with is kept, by its session's id, which lup minted: what resumes it, its context kept, once it ended, a side job at its report and a builder when the operator ended it, and something that would wake it running reaches it (`SpawnTools.restarted`)."""
         return self.spawned_sessions / f"{session}.json"
 
     @property

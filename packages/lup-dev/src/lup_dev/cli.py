@@ -182,6 +182,7 @@ from lup_dev.inbox.bearings import RepositoryBearings
 from lup_dev.inbox.citations import plainly
 from lup_dev.inbox.delivery import (
     Delivery,
+    HoldAnswering,
     clocked,
     standing,
 )
@@ -282,7 +283,7 @@ from lup_dev.launch.session import (
     hooked,
     terminal_settings,
 )
-from lup_dev.launch.spawning import SpawnTools, spawnable_in
+from lup_dev.launch.spawning import Respawns, SpawnTools
 from lup_dev.launch.trial import TerminalRun, Trial, scratched, taken_over_there
 from lup_dev.launch.trust import (
     Approving,
@@ -781,10 +782,7 @@ def host_serve(context: typer.Context) -> None:
         notices=Unsaid() if rehearsing else NotifySend(),
         clock=SystemClock(),
         say=typer.echo,
-        settle_hold=lambda change, repository, approved, said: hold_answered(
-            layout, change, repository, approved=approved, comment=said
-        ),
-        hold_unheard=lambda change: hold_unheard(layout, change),
+        hold_answering=HeldAnswers(layout=layout),
         queues={
             adapter.runtime.name(): adapter.queues
             for adapter in known.known
@@ -804,9 +802,7 @@ def host_serve(context: typer.Context) -> None:
     coming = Coming(delivery=delivery, layout=layout, say=typer.echo)
     delivery.starting = coming.started
     spawning = spawn_tools(delivery, layout, launchers, known)
-    delivery.resumer = spawning.resumed
-    delivery.restarter = spawning.restarted
-    delivery.elsewhere = partial(spawnable_in, layout)
+    delivery.respawning = Respawns(tools=spawning)
 
     async def reap() -> None:
         for each in launchers.reaped(layout):
@@ -1280,6 +1276,24 @@ def heading(item: Item, paths: Sequence[Pathed] = ()) -> str:
         f"{cited(item.number)}, {what(item)} from {called(item.sender, paths)}{where} to "
         f"{recipient}, made {clocked(item.made)}, {standing(item)}:"
     )
+
+
+class HeldAnswers(Model, HoldAnswering):
+    """Where the operator's answers to held changes go on this machine: each hook's answer file under lup's state (`hold_answered`, `hold_unheard`)."""
+
+    layout: Layout
+
+    @override
+    def answered(
+        self, change: HeldChange, repository: Path, *, approved: bool, said: str
+    ) -> str | None:
+        return hold_answered(
+            self.layout, change, repository, approved=approved, comment=said
+        )
+
+    @override
+    def unheard(self, change: HeldChange) -> str | None:
+        return hold_unheard(self.layout, change)
 
 
 def hold_answered(

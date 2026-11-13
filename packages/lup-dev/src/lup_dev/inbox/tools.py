@@ -626,7 +626,7 @@ class Speaker(Model, arbitrary_types_allowed=True):
         return await self.filed(said, "concern")
 
     def filed_elsewhere(self, said: Concerning) -> Said:
-        """File a concern in the `No agent` of the repository `said` names, which this one's approved declaration lets its sessions file into (`Delivery.elsewhere`): at its top, nobody holding it, `text` its body, left by this conversation.
+        """File a concern in the `No agent` of the repository `said` names, which this one's approved declaration lets its sessions file into (`Respawning.elsewhere`): at its top, nobody holding it, `text` its body, left by this conversation.
 
         Its words go in as its body rather than as an item: the ledger keeps an
         item in its sender's repository, and a concern's items in its own.
@@ -645,12 +645,12 @@ class Speaker(Model, arbitrary_types_allowed=True):
         text = (said.text or "").strip()
         if not text:
             return Said(text="Nothing filed: say what it is, in `text`")
-        elsewhere = self.delivery.elsewhere
-        if elsewhere is None:
+        respawning = self.delivery.respawning
+        if respawning is None:
             return Said(text="Nothing filed: no repository is open to it here")
         concerns = self.concerns
         try:
-            repository = elsewhere(self.party.repository, named)
+            repository = respawning.elsewhere(self.party.repository, named)
             thread = concerns.opened(
                 self.party, said.title.strip() or cue(text), repository, taken=True
             )
@@ -908,19 +908,9 @@ class Speaker(Model, arbitrary_types_allowed=True):
                     call=self.call,
                     thread=thread,
                 )
-                resumed = await self.resumed(recipient)
                 return self.answered(
-                    f"{self.arriving(recipient, item.number, thread)}{resumed}", copy
+                    self.arriving(recipient, item.number, thread), copy
                 )
-
-    async def resumed(self, recipient: Conversation) -> str:
-        """Resume `recipient`, a side job of this conversation's that ended, its session held again with its context, the message just sent its first turn (`Delivery.resumer`); say how, or nothing where it runs, or is no ended side job of theirs."""
-        resumer = self.delivery.resumer
-        if resumer is None or recipient.agent is not None:
-            return ""
-        if self.concerns.live(recipient):
-            return ""
-        return await resumer(recipient, self.party, self.launch)
 
     def addressed(self, to: str) -> Party:
         """Return the party `to` names for this conversation: the operator, their parent, or one of their own subagents, by their name, their path or their runtime's id.

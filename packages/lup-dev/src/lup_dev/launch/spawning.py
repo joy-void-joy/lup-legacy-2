@@ -94,8 +94,8 @@ from lup_dev.host.held import HeldLaunch, Launchers, Spawning, Starting
 from lup_dev.host.protocol import Register, Spawner, branch_name, segment
 from lup_dev.host.rooms import RoomTools
 from lup_dev.host.service import Program, executed
-from lup_dev.inbox.delivery import Delivery
-from lup_dev.inbox.store import InboxError, Message
+from lup_dev.inbox.delivery import Delivery, Respawning
+from lup_dev.inbox.store import InboxError, Item, Message
 from lup_dev.launch.secrets import git_directory
 from lup_dev.layout import Layout
 from lup_dev.policy.worktrees import branch_named, made_root
@@ -520,44 +520,18 @@ class SpawnTools(MutableModel, RoomTools, arbitrary_types_allowed=True):
             return launch.repository
         return spawnable_in(self.layout, launch.repository, named)
 
-    async def resumed(
-        self, ended: Conversation, spawner: Conversation, launch: Register
-    ) -> str:
-        """Resume `ended`, a session `spawner`, of `launch`, spawned, that has ended, a side job at its report or a builder the operator ended, its session held again in its worktree with its context, as `lup-dev spawn --resume` holds one, the message they just sent it waiting for its call-up; say how it went, after `send`'s answer, or nothing where it runs, or is none of theirs.
+    async def restarted(self, ended: Conversation, item: Item) -> str | None:
+        """Restart `ended`, a session an agent spawned that has ended, its session held again in its worktree with its context, as `lup-dev spawn --resume` holds one, `item` waiting for it, which would wake it running: the operator's words, its spawner's message, a side job's report; say why not where it can't be, and nothing where it is, it runs, or no agent spawned it.
 
-        Its spawner is recorded again as the conversation that sent, of the
-        launch they send from, the concern a builder was handed kept.
-        """
-        spec = self.kept(ended)
-        if spec is None or spec.spawner is None:
-            return ""
-        if spec.spawner.conversation != spawner:
-            return ""
-        how = (
-            "It ended at its report" if spec.spawner.concern is None else "It had ended"
-        )
-        again = spec.spawner.model_copy(update={"launch": launch.launch})
-        try:
-            starting = await self.relaunched(
-                spec, ended, again, modelled(launch.model), launch
-            )
-        except SpawnError as refused:
-            return f" {how}, and isn't resumed: {refused}."
-        if starting is None:
-            return ""
-        return (
-            f" {how}: it's resumed held in {spec.worktree}, with all it knew, your "
-            f"message its first turn once it's up; its launcher writes to "
-            f"{starting.log}."
-        )
-
-    async def restarted(self, ended: Conversation) -> str | None:
-        """Restart `ended`, a session an agent spawned that has ended, its session held again in its worktree with its context, as `lup-dev spawn --resume` holds one, where the operator's words reached it, which wait for its call-up; say why not where it can't be, and nothing where it is, it runs, or no agent spawned it.
-
-        It answers to the spawner it was spawned by, as recorded then, the
-        concern a builder was handed kept, and runs on the arguments it was
-        spawned with; marked restarted (`Spawner.restarted`), so a side job
-        runs to its next report though its spawner's launch has ended.
+        Only where its last words were heard in a launch lup started for it
+        (`SpawnedSession.launches`): a room of a terminal launch can name an
+        ended session's id and end a turn as it. It answers to the spawner it
+        was spawned by, the concern a builder was handed kept. Where its
+        spawner sent `item`, it's recorded again as of the launch they send
+        from, on its model, whose room makes its worktree again where it's gone
+        (`remade`); else as restarted (`Spawner.restarted`), so a side job runs
+        to its next report though its spawner's launch has ended, on the
+        arguments it was spawned with, and a worktree gone stays gone.
         """
         record = self.record(ended)
         spawner = None if record is None else record.spec.spawner
@@ -566,23 +540,39 @@ class SpawnTools(MutableModel, RoomTools, arbitrary_types_allowed=True):
         spec = record.spec
         place = self.delivery.inbox.whereabouts.get(ended.key())
         if place is None or place.launch not in record.launches:
-            # A room of a terminal launch can name an ended session's id: the
-            # words the operator answered may be that room's, not its.
             return (
                 "its last words were heard in a launch lup didn't start for it, so "
                 "they may be another session's, speaking as it"
             )
+        asking = self.sending(item, spawner)
         try:
             await self.relaunched(
                 spec,
                 ended,
-                spawner.model_copy(update={"restarted": True}),
-                spec.arguments,
-                None,
+                spawner.model_copy(update={"restarted": True})
+                if asking is None
+                else spawner.model_copy(update={"launch": asking.launch}),
+                spec.arguments if asking is None else modelled(asking.model),
+                asking,
             )
         except SpawnError as refused:
             return str(refused)
         return None
+
+    def sending(self, item: Item, spawner: Spawner) -> Register | None:
+        """Return the launch `item`'s sender sends from, where they're `spawner`'s conversation and a launch the service serves runs them; none else."""
+        if item.sender != spawner.conversation:
+            return None
+        place = self.delivery.inbox.whereabouts.get(spawner.conversation.key())
+        if place is None:
+            return None
+        return next(
+            (each for each in self.served() if each.launch == place.launch), None
+        )
+
+    def elsewhere(self, repository: Path, named: str) -> Path:
+        """Return the git directory of the repository the one at `repository` lets its sessions file concerns into, and spawn in, by the name `named` (`spawnable_in`)."""
+        return spawnable_in(self.layout, repository, named)
 
     def kept(self, ended: Conversation) -> HeldLaunch | None:
         """Return what `ended`, a session's own conversation, was started with where an agent spawned it (`record`)."""
@@ -1104,6 +1094,20 @@ def spawnable_in(layout: Layout, repository: Path, named: str) -> Path:
         )
         raise SpawnError(message)
     return other
+
+
+class Respawns(Model, Respawning, arbitrary_types_allowed=True):
+    """The spawn tool's way of bringing a session lup started back, and of finding another repository, as the inbox reaches it (`Delivery.respawning`)."""
+
+    tools: SpawnTools
+
+    @override
+    async def restarted(self, ended: Conversation, item: Item) -> str | None:
+        return await self.tools.restarted(ended, item)
+
+    @override
+    def elsewhere(self, repository: Path, named: str) -> Path:
+        return self.tools.elsewhere(repository, named)
 
 
 async def started_at(git: Git, start: str, within: timedelta) -> str:

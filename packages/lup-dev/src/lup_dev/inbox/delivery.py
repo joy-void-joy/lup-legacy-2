@@ -126,9 +126,9 @@ import asyncio
 import difflib
 import secrets
 import textwrap
-from collections.abc import Awaitable, Callable, Coroutine, Generator, Sequence
+from abc import ABC, abstractmethod
+from collections.abc import Callable, Coroutine, Generator, Sequence
 from datetime import datetime, timedelta
-from pathlib import Path
 from typing import TYPE_CHECKING, Literal, override
 
 from pydantic import TypeAdapter
@@ -214,6 +214,8 @@ from lup_ledger import threads as ledger
 from lup_ledger.parties import Conversation, Operator, Party
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from lup_dev.host.courier import Conversation as Caller
     from lup_ledger.threads import Thread
 
@@ -914,6 +916,32 @@ class Pushed(Model):
     (`Delivery.dropped`): never taken for dropped itself."""
 
 
+class Respawning(ABC):
+    """What brings a session lup started back once it ended, and finds the repositories another lets its sessions reach: the spawn tool's (`SpawnTools`), which `cli.py` gives."""
+
+    @abstractmethod
+    async def restarted(self, ended: Conversation, item: Item) -> str | None:
+        """Restart `ended`, a session's own conversation that ended, `item` waiting for them, which would wake them running; say why not where it can't be, none where it is, it runs, or isn't one lup can bring back."""
+
+    @abstractmethod
+    def elsewhere(self, repository: Path, named: str) -> Path:
+        """Return the git directory of the repository the one at `repository` lets its sessions file concerns into, and spawn in, by the name `named`; raise `InboxError` where it names none."""
+
+
+class HoldAnswering(ABC):
+    """Where the operator's answer to a held change goes: to the hook that waits on it, and, where none heard it, to the conversation that made it (`cli.py` gives it)."""
+
+    @abstractmethod
+    def answered(
+        self, change: HeldChange, repository: Path, *, approved: bool, said: str
+    ) -> str | None:
+        """Write the operator's answer to `change`, of the repository at `repository`, where its hook waits for it, yes or no and their comment, and return what to tell the conversation that made it where no call waits to hear it."""
+
+    @abstractmethod
+    def unheard(self, change: HeldChange) -> str | None:
+        """Return what to tell the conversation that made `change`, answered already, where neither a call nor their inbox told them, noting it told."""
+
+
 class Delivery(MutableModel, Post, arbitrary_types_allowed=True):
     """Each conversation's inbox, told once; and the operator's, noticed on their desktop."""
 
@@ -960,14 +988,9 @@ class Delivery(MutableModel, Post, arbitrary_types_allowed=True):
     settling: dict[int, asyncio.Event] = {}
     """By approval's number, in memory: set once the approval is answered, which
     wakes every launch waiting on it."""
-    settle_hold: Callable[[HeldChange, Path, bool, str], str | None] | None = None
-    """Writes the operator's answer to a held change of a repository, by its
-    git directory, where its hook waits for it, yes or no and their comment,
-    and returns what to tell the conversation that made it where no call waits
-    to hear it; none where this service answers no hold."""
-    hold_unheard: Callable[[HeldChange], str | None] = lambda _: None
-    """Returns what to tell the conversation that made a held change, answered
-    already, where neither a call nor their inbox told them, noting it told."""
+    hold_answering: HoldAnswering | None = None
+    """Where the operator's answers to held changes go; none where this service
+    answers no hold."""
     landing: Callable[[int], str | None] = lambda _: None
     """Says what the landing waiting on the flagged write it's given, by its
     number, lands where, in a few words (`lup_dev.policy.waits`); none where
@@ -982,26 +1005,10 @@ class Delivery(MutableModel, Post, arbitrary_types_allowed=True):
     (`lup_dev.policy.coming`); none looks at nothing."""
     looks: list[asyncio.Task[None]] = []
     """Each look `starting` began, kept until it's done."""
-    resumer: Callable[[Conversation, Conversation, Register], Awaitable[str]] | None = (
-        None
-    )
-    """Resumes a session an agent spawned that ended, its session held again
-    with its context, where its spawner sends it a message: the session, the
-    spawner, and their launch in; what to add to `send`'s answer out, empty
-    where it's none of the spawner's to resume (`SpawnTools.resumed`, which
-    `cli.py` gives). None resumes nothing."""
-    elsewhere: Callable[[Path, str], Path] | None = None
-    """Finds the repository another's approved declaration lets its sessions
-    spawn in and file concerns into, by the name it gives it: the asking
-    repository's git directory and that name in, the other's git directory
-    out; raises `InboxError` where it names none (`spawnable_in`, which
-    `cli.py` gives). None lets none."""
-    restarter: Callable[[Conversation], Awaitable[str | None]] | None = None
-    """Restarts a session an agent spawned that ended, its session held again
-    with its context, where the operator's words reach it: its own
-    conversation in; why it isn't restarted out, none where it is, runs, or no
-    agent spawned it (`SpawnTools.restarted`, which `cli.py` gives). None
-    restarts nothing."""
+    respawning: Respawning | None = None
+    """What brings a session lup started back once it ended, an item that
+    would wake it waiting for it, and finds the repositories another lets its
+    sessions reach; none brings back nothing."""
     ending: list[asyncio.Task[None]] = []
     """Each side job's end asked of its launcher at its report, kept until it's
     answered."""
@@ -2662,7 +2669,8 @@ class Delivery(MutableModel, Post, arbitrary_types_allowed=True):
                 item.sender == party
                 and isinstance(item.reason, HeldChange)
                 and isinstance(item.state, Decided)
-                and (said := self.hold_unheard(item.reason)) is not None
+                and self.hold_answering is not None
+                and (said := self.hold_answering.unheard(item.reason)) is not None
             ):
                 await self.hold_told(item, said)
 
@@ -2673,7 +2681,6 @@ class Delivery(MutableModel, Post, arbitrary_types_allowed=True):
             Operator(),
             item.sender,
             None,
-            restarts=False,
         )
 
     def arrive(self, party: Conversation) -> None:
@@ -2691,9 +2698,8 @@ class Delivery(MutableModel, Post, arbitrary_types_allowed=True):
         call: str | None = None,
         quiet: bool = False,
         thread: Thread | None = None,
-        restarts: bool = True,
     ) -> Item:
-        """Make an item, its citations of the operator's words read where it's a conversation's own words to them (`cited`), put it in a thread where it's a conversation's to the operator (`landed`), and deliver it (`delivered`); `call` is the runtime's id for the agent's call that made it, where one did, `quiet` says it waits for a call (`Item.quiet`), `thread` is the thread its call named, where it named one, and `restarts` whether, the operator's, it restarts a spawned session that ended: not lup's word on one of their decisions."""
+        """Make an item, its citations of the operator's words read where it's a conversation's own words to them (`cited`), put it in a thread where it's a conversation's to the operator (`landed`), and deliver it (`delivered`); `call` is the runtime's id for the agent's call that made it, where one did, `quiet` says it waits for a call (`Item.quiet`), and `thread` is the thread its call named, where it named one."""
         made = self.inbox.made(
             reason,
             sender,
@@ -2705,7 +2711,7 @@ class Delivery(MutableModel, Post, arbitrary_types_allowed=True):
         )
         item = self.cited(made)
         self.landed(item, thread)
-        await self.delivered(item, restarts=restarts)
+        await self.delivered(item)
         return item
 
     async def copied(
@@ -2766,8 +2772,8 @@ class Delivery(MutableModel, Post, arbitrary_types_allowed=True):
         ):
             self.concerns().landed(item, thread)
 
-    async def delivered(self, item: Item, *, restarts: bool = True) -> None:
-        """Tell the recipient that `item` reached their inbox: the operator through a desktop notice, a conversation through their held calls, or by waking them where the item isn't quiet: the operator's own, or a message another conversation sent them; and where it's the operator's words, a message, an answer or a review's comments, `restarts` saying it isn't lup's word on a decision of theirs, and reaches a session an agent spawned that has ended, restart it (`restarted`)."""
+    async def delivered(self, item: Item) -> None:
+        """Tell the recipient that `item` reached their inbox: the operator through a desktop notice, a conversation through their held calls, or by waking them where the item isn't quiet: the operator's own, or a message another conversation sent them; one that ended, which such an item would have woken, brought back (`restarted`)."""
         match item.recipient:
             case Operator():
                 await self.noticed(item)
@@ -2775,27 +2781,23 @@ class Delivery(MutableModel, Post, arbitrary_types_allowed=True):
                 self.arrive(conversation)
                 if not item.quiet:
                     await self.wake(conversation)
-                if (
-                    restarts
-                    and isinstance(item.sender, Operator)
-                    and isinstance(item.reason, Message | Answer | Review)
-                ):
                     await self.restarted(item, conversation)
 
     async def restarted(self, item: Item, party: Conversation) -> None:
-        """Restart `party`, a session's own conversation an agent spawned that has ended, the operator's `item` waiting for them as their first turn once they're up (`restarter`); where they can't be, tell the operator why, as a problem from them, in the concern they worked in, so the operator's words aren't left waiting on nobody unsaid."""
-        restarter = self.restarter
-        if restarter is None or party.agent is not None or self.concerns().live(party):
+        """Bring `party`, a session's own conversation that ended, back, `item` waiting for them as what would have woken them (`Respawning.restarted`); where they can't be, tell whoever sent it why, as a problem from them, so it doesn't wait on nobody unsaid."""
+        respawning = self.respawning
+        if respawning is None or party.agent is not None or self.concerns().live(party):
             return
-        unstarted = await restarter(party)
+        unstarted = await respawning.restarted(party, item)
         if unstarted is None:
             return
         who = self.roster().who(party)
+        whose = "your words" if isinstance(item.sender, Operator) else "what you sent"
         text = (
-            f"lup: {who} had ended, and your words in {cited(item.number)} didn't "
+            f"lup: {who} had ended, and {whose} in {cited(item.number)} didn't "
             f"restart them: {unstarted}."
         )
-        await self.posted(Message(kind="problem", text=text), party, Operator(), None)
+        await self.posted(Message(kind="problem", text=text), party, item.sender, None)
 
     def wakes(self, party: Conversation) -> bool:
         """Say whether `party`'s session can be woken idle at all: their runtime spells a push or a line for its messaging socket (`Waker`); not where its adapter declares neither."""
@@ -3414,7 +3416,7 @@ class Delivery(MutableModel, Post, arbitrary_types_allowed=True):
             return item
         unheard = None
         if isinstance(item.reason, HeldChange) and item.reason.landing is None:
-            if self.settle_hold is None:
+            if self.hold_answering is None:
                 message = (
                     f"{cited(number)} is a held change, which this service can't answer"
                 )
@@ -3422,8 +3424,8 @@ class Delivery(MutableModel, Post, arbitrary_types_allowed=True):
             if not isinstance(item.sender, Conversation):
                 message = f"{cited(number)} is a held change no conversation made"
                 raise InboxError(message)
-            unheard = self.settle_hold(
-                item.reason, item.sender.repository, approved, comment
+            unheard = self.hold_answering.answered(
+                item.reason, item.sender.repository, approved=approved, said=comment
             )
         decided = Decided(at=self.clock.now(), approved=approved, comment=comment)
         answered = self.inbox.kept(item.model_copy(update={"state": decided}))
@@ -3437,7 +3439,6 @@ class Delivery(MutableModel, Post, arbitrary_types_allowed=True):
                     Operator(),
                     pusher,
                     None,
-                    restarts=False,
                 )
             case HeldChange(landing=AtLanding() as landing):
                 await self.landing_decided(
@@ -3479,7 +3480,6 @@ class Delivery(MutableModel, Post, arbitrary_types_allowed=True):
             Operator(),
             lander,
             None,
-            restarts=bool(comment.strip()),
         )
 
     async def held_back(self, item: Item, comments: str) -> Item:
