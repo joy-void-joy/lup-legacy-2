@@ -645,6 +645,16 @@ class Played(HostClient):
     @override
     def held(self, request: Request) -> Outstanding:
         self.asked.append(request)
+        side = self.sessions.get("trial-side-job")
+        if isinstance(request, End) and request.launch.startswith("h") and side:
+            # The sweep tells of the side job's worktree its spawner left.
+            self.item(
+                side,
+                Operator(),
+                "lup: `trial-side-job`'s worktree stays, though the launch that "
+                "spawned it has ended.",
+                ending=False,
+            )
         if isinstance(request, End):
             # A side job ends with the launch that spawned it.
             self.served[:] = [
@@ -748,7 +758,7 @@ def test_the_trial_tries_each_step_and_files_what_it_saw_under_the_session(
         ("ends", True),
         ("a builder outlives its spawner", True),
         ("your reply restarts the builder", True),
-        ("a side job's worktree goes with its spawner", True),
+        ("a side job's worktree left is told", True),
         ("resumes held", True),
         ("a terminal takes it over", True),
         ("back to held", True),
@@ -769,29 +779,6 @@ def test_the_trial_tries_each_step_and_files_what_it_saw_under_the_session(
         and each.number != noted.number
     ]
     assert host.restarts == [0]
-
-
-def test_a_trial_given_another_repository_has_its_session_spawn_a_side_job_there(
-    tmp_path: Path, clock: FakeClock
-) -> None:
-    host, trial = played(tmp_path, clock)
-    trial.into = "yonder"
-
-    steps = trial.run()
-
-    [elsewhere] = [
-        each for each in steps if each.name == "spawns in another repository"
-    ]
-    assert elsewhere.passed, elsewhere.seen
-    assert elsewhere.seen == (
-        "`trial-elsewhere` started held in /y/.git/tree/trial-elsewhere, of "
-        "/y/.git; its report reached the session, which answered with it, and it "
-        "ended."
-    )
-    asked = [each for each in host.asked if isinstance(each, SendItem)]
-    assert any("`repository` `yonder`" in each.text for each in asked)
-    assert all(each.passed for each in steps), [each.seen for each in steps]
-    assert len(steps) == 17
 
 
 def test_a_trial_whose_session_never_starts_says_so_and_files_it_anyway(
@@ -820,8 +807,7 @@ def test_a_trial_whose_session_never_starts_says_so_and_files_it_anyway(
         "a room's command is stopped in time, interrupts, survives a restart, "
         "spawns a side job, resumes its side job, hands a concern over, ends, a "
         "builder outlives its spawner, your reply restarts the builder, a side job's "
-        "worktree goes with its spawner, resumes held, a terminal takes it over, back "
-        "to held."
+        "worktree left is told, resumes held, a terminal takes it over, back to held."
     ) in report
     sender = host.items[number - 1].sender
     assert isinstance(sender, Conversation)
@@ -1464,10 +1450,10 @@ def test_the_sweep_ends_each_side_job_whose_spawner_s_launch_isn_t_served(
     ) in said
 
 
-def test_the_sweep_tidies_side_jobs_worktrees_apart_one_tidy_at_a_time_and_says_one_failing(
+def test_the_sweep_looks_at_side_jobs_worktrees_left_apart_one_look_at_a_time_and_says_one_failing(
     layout: Layout, tmp_path: Path, clock: FakeClock
 ) -> None:
-    """Each room the tidy starts may take minutes, and any part of a worktree's path can be a link a room made, leading where a look waits: the sweep doesn't wait on it, and starts no other while one runs."""
+    """git reads refs a room writes, within its limits, and any part of a worktree's path can be a link a room made, leading where a look waits: the sweep doesn't wait on it, and starts no other while one runs."""
     host, _ = played(tmp_path, clock)
     tidies: list[int] = []
     said: list[str] = []
@@ -1475,7 +1461,7 @@ def test_the_sweep_tidies_side_jobs_worktrees_apart_one_tidy_at_a_time_and_says_
     async def swept() -> bool:
         released = asyncio.Event()
 
-        async def tidy() -> None:
+        async def left() -> None:
             tidies.append(1)
             await released.wait()
             message = "the room's git left a lock behind"
@@ -1487,21 +1473,21 @@ def test_the_sweep_tidies_side_jobs_worktrees_apart_one_tidy_at_a_time_and_says_
             podman=Podman(),
             say=said.append,
             running=list,
-            tidy=tidy,
+            left=left,
         )
-        sweeping.tidied()
+        sweeping.looked_left()
         await asyncio.sleep(0)
-        sweeping.tidied()
-        running = sweeping.tidying is not None and not sweeping.tidying.done()
+        sweeping.looked_left()
+        running = sweeping.leaving is not None and not sweeping.leaving.done()
         released.set()
-        if sweeping.tidying is not None:
-            await sweeping.tidying
+        if sweeping.leaving is not None:
+            await sweeping.leaving
         return running
 
     assert asyncio.run(swept())
     assert tidies == [1]
     [failed] = said
-    assert failed.startswith("The tidy of side jobs' worktrees failed:\n")
+    assert failed.startswith("The look at side jobs' worktrees left failed:\n")
     assert failed.endswith("OSError: the room's git left a lock behind\n")
 
 

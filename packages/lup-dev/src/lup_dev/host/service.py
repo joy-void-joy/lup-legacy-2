@@ -1570,7 +1570,7 @@ class Launches(MutableModel, arbitrary_types_allowed=True):
         )
 
     def side_jobs(self, launch: str) -> list[Register]:
-        """Return each launch served whose session `launch`'s spawned through lup as a side job, held by its launcher: what ends with it."""
+        """Return each launch served whose session `launch`'s spawned through lup as a side job, held by its launcher: what ends with it; not one the operator's words restarted, which runs to its next report (`Spawner.restarted`)."""
         holders = self.holders
         return [
             each.launch
@@ -1578,6 +1578,7 @@ class Launches(MutableModel, arbitrary_types_allowed=True):
             if each.launch.spawner is not None
             and each.launch.spawner.launch == launch
             and each.launch.spawner.concern is None
+            and not each.launch.spawner.restarted
             and holders is not None
             and holders.holds(each.launch.launch)
         ]

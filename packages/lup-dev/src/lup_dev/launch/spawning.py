@@ -18,27 +18,25 @@ line, a path or git, is held to this:
   launch and that conversation, so the parent link is the host's, not the
   room's word.
 - **The repository** is the one the host recorded for the spawner's launch
-  (`Register.repository`), never a path the call names; or, where the call
-  names another by name, the one the spawner's repository's approval lets its
-  sessions spawn in by that name, at the path the host kept as the operator
-  approved it (`spawnable_in`, `Approval.spawnable`), which has something
-  approved of its own. The launcher takes it as given (`HeldLaunch.repository`,
-  `located` in `cli.py`), never finding it through the worktree, whose `.git`
-  file a room writes, and refuses a worktree that repository doesn't name
-  back; it runs that repository's approved copy and declaration.
+  (`Register.repository`), never a path the call names. One the call names by
+  name is read from what the spawner's repository's approval lets its
+  sessions spawn in, at the path the host kept as the operator approved it
+  (`spawnable_in`, `Approval.spawnable`), and refused yet: no room that's the
+  spawner's could make its worktree. The launcher takes the repository as
+  given (`HeldLaunch.repository`, `located` in `cli.py`), never finding it
+  through the worktree, whose `.git` file a room writes, and refuses a
+  worktree that repository doesn't name back.
 - **The worktree** is made at `tree/<branch>` in that repository's git
   directory (`made_root`), never by the host's git on what a room committed: a
   checkout runs filters a commit's `.gitattributes` picks, and writes through
-  links a room planted on the way. It's made by that repository's own git in
-  a room of it that runs, through `podman exec` (as `land` removes
-  worktrees), the spawner's own where it's theirs: what it does there, that
-  room could do itself, under the same walls, the host's environments and the
-  files with a secret's name hidden from it (`git_in`). Never in a room
-  started for the one command, which would mount the repository without what
-  a session's room hides. In another repository, where no session runs, the
-  spawn is refused. The command is a list, no shell: `git`, the git directory
-  from the host's record, `worktree add`, the branch, the root and a commit's
-  id.
+  links a room planted on the way. It's made by the spawner's room's own git,
+  through `podman exec` (as `land` removes worktrees), pinned to the git
+  directory, its hooks and file monitor off (`git_in`): what it does there,
+  that room could do itself. Never in another session's room, where what a
+  room planted in the shared git directory would run as that session, nor in
+  a room started for the one command, which wouldn't hide what a session's
+  room hides. The command is a list, no shell: `git`, the git directory from
+  the host's record, `worktree add`, the branch, the root and a commit's id.
 - **The branch** is the call's `name` in a branch's shape (`branch_named`):
   ASCII letters, digits and `-`, never starting with `-`, so neither git nor a
   path reads it as anything else; a branch or a worktree that's there already
@@ -91,7 +89,7 @@ from lup.tools.tool import Accepted, AgentTool, ToolSpec
 from lup.tools.tool import Refused as Rejected
 from lup.types import Model, MutableModel
 from lup_dev.approval import approved, approved_branches
-from lup_dev.git import Git, GitError, threaded
+from lup_dev.git import Git, GitError, pinning, threaded
 from lup_dev.host.held import HeldLaunch, Launchers, Spawning, Starting
 from lup_dev.host.protocol import Register, Spawner, branch_name, segment
 from lup_dev.host.rooms import RoomTools
@@ -370,6 +368,15 @@ class SpawnTools(MutableModel, RoomTools, arbitrary_types_allowed=True):
         if capped is not None:
             raise SpawnError(capped)
         repository = self.target(launch, spawn.repository)
+        if repository != launch.repository:
+            # lup: defer(issue=117, why="a session spawned in another repository needs its worktree made by a room of that repository walled as its sessions' rooms are, which lup doesn't start yet: the spawner's room can't reach it, and another session's room isn't the spawner's to run git in")
+            message = (
+                f"your project lets its sessions spawn in `{spawn.repository}`, but "
+                "a session there needs its worktree made by a room of that "
+                "repository's, which lup doesn't start yet: file what you'd have "
+                "done there with `concern`, given that `repository`"
+            )
+            raise SpawnError(message)
         reserved = self.limited(repository)
         try:
             return await self.started(bound, spawn, wanted, session, reserved)
@@ -432,18 +439,20 @@ class SpawnTools(MutableModel, RoomTools, arbitrary_types_allowed=True):
             conversation=party,
             concern=None if thread is None else thread.number,
         )
-        try:
-            starting = await self.spawning.started(
-                lambda minted: HeldLaunch(
-                    launch=minted,
-                    runtime=launch.runtime,
-                    worktree=made.root,
-                    session=session,
-                    repository=repository,
-                    spawner=spawner,
-                    arguments=modelled(launch.model),
-                )
+
+        def spawned_as(minted: str) -> HeldLaunch:
+            return HeldLaunch(
+                launch=minted,
+                runtime=launch.runtime,
+                worktree=made.root,
+                session=session,
+                repository=repository,
+                spawner=spawner,
+                arguments=modelled(launch.model),
             )
+
+        try:
+            starting = await self.spawning.started(spawned_as)
         except (ProgramError, OSError) as unstarted:
             message = (
                 f"its launcher didn't start: {unstarted}"
@@ -470,9 +479,9 @@ class SpawnTools(MutableModel, RoomTools, arbitrary_types_allowed=True):
         except (InboxError, OSError) as unsent:
             # A session up with no brief would wait on nobody: its launcher is
             # ended before it starts one.
-            await asyncio.to_thread(
-                self.launchers.started[starting.launch].end, self.making
-            )
+            launcher = self.launchers.started.get(starting.launch)
+            if launcher is not None:
+                await asyncio.to_thread(launcher.end, self.making)
             message = (
                 f"its brief wasn't sent, so its launcher was ended: {unsent}"
                 f"{await self.unmade(launch, made)}{opened(thread)}"
@@ -480,9 +489,7 @@ class SpawnTools(MutableModel, RoomTools, arbitrary_types_allowed=True):
             raise SpawnError(message) from unsent
         write_model(
             self.layout.spawned_session(session),
-            SpawnedSession(
-                spec=self.launchers.specs[starting.launch], commit=made.commit
-            ),
+            SpawnedSession(spec=spawned_as(starting.launch), commit=made.commit),
         )
         return said(made, start, sent.number, starting.log, handed)
 
@@ -524,7 +531,9 @@ class SpawnTools(MutableModel, RoomTools, arbitrary_types_allowed=True):
         )
         again = spec.spawner.model_copy(update={"launch": launch.launch})
         try:
-            starting = await self.relaunched(spec, ended, again, modelled(launch.model))
+            starting = await self.relaunched(
+                spec, ended, again, modelled(launch.model), launch
+            )
         except SpawnError as refused:
             return f" {how}, and isn't resumed: {refused}."
         if starting is None:
@@ -548,7 +557,7 @@ class SpawnTools(MutableModel, RoomTools, arbitrary_types_allowed=True):
             return None
         spawner = spec.spawner.model_copy(update={"restarted": True})
         try:
-            await self.relaunched(spec, ended, spawner, spec.arguments)
+            await self.relaunched(spec, ended, spawner, spec.arguments, None)
         except SpawnError as refused:
             return str(refused)
         return None
@@ -569,23 +578,33 @@ class SpawnTools(MutableModel, RoomTools, arbitrary_types_allowed=True):
         ended: Conversation,
         spawner: Spawner,
         arguments: list[str],
+        asking: Register | None,
     ) -> Starting | None:
         """Start a launcher resuming `ended`, spawned as `spec` says, held in its worktree, answering to `spawner`, on `arguments`, counted against the limits as a spawn is, and return it starting; none where a launch runs it, or one is starting on it. Raise `SpawnError` where it can't be resumed, saying why.
 
-        Whether a launch runs it or starts on it, and its count, are read and
-        taken with nothing awaited between, so two at once start one. Where its
-        worktree is gone, it's made again at the same path (`remade`), where
-        its runtime finds its record.
+        Whether a launch runs it or starts on it, its repository's session of
+        that id, and its count, are read and taken with nothing awaited
+        between, so two at once start one. Where its worktree is gone, it's
+        made again at the same path (`remade`), where its runtime finds its
+        record, in the room of `asking`, its spawner's launch, where they ask.
         """
         session = ended.session
         repository = spec.repository or ended.repository
         starting = [
-            each.resume or each.session for each in self.launchers.spawning(self.layout)
+            each.resume or each.session
+            for each in self.launchers.spawning(self.layout)
+            if (each.repository or repository) == repository
         ]
         if (
-            any(each.session == session for each in self.served())
+            any(
+                each.session == session and each.repository == repository
+                for each in self.served()
+            )
             or session in starting
-            or any(each.session == session for each in self.reserved)
+            or any(
+                each.session == session and each.repository == repository
+                for each in self.reserved
+            )
         ):
             return None
         reserved = self.limited(repository)
@@ -597,7 +616,7 @@ class SpawnTools(MutableModel, RoomTools, arbitrary_types_allowed=True):
         ]
         try:
             if not spec.worktree.is_dir(follow_symlinks=False):
-                await self.remade(repository, spec.worktree)
+                await self.remade(repository, spec.worktree, asking)
             return await self.spawning.started(
                 lambda minted: spec.model_copy(
                     update={
@@ -617,29 +636,19 @@ class SpawnTools(MutableModel, RoomTools, arbitrary_types_allowed=True):
                 each for each in self.reserved if each.token != reserved.token
             ]
 
-    async def tidied(self) -> None:
-        """Remove the worktree and branch of each side job whose spawner's launch is gone, nothing running it, where its branch holds nothing beyond where it started or what's on the integration branch or the running one, and git finds nothing uncommitted in it; else keep them, and tell the operator once why, as a note from it (`SpawnedSession.stays`). The sweep runs it, apart (`Sweeping.tidy`).
+    async def left(self) -> None:
+        """Tell the operator once of each side job's worktree left once the launch that spawned it is gone, nothing running it: whether its branch holds anything beyond where it started or what's on the integration branch or the running one, as git pinned to the repository reads their refs, in its own threads. lup removes none (`SpawnedSession.stays`). The sweep runs it, apart (`Sweeping.left`).
 
-        By the repository's own git in a room of it that runs (`git_in`), its
-        spawner's and its own being gone: where none runs, it waits for the
-        next sweep that finds one. Whether its commits are merged is read by
-        git pinned to the repository, in its own threads, refs alone; whether
-        anything's uncommitted, by that room's `git worktree remove`, which
-        refuses it, since `git status` on the host would run the filters a
-        room's commits pick. A record that doesn't read, or a look that fails,
-        is passed over, and the next sweep looks again; what failed is said in
-        the service's log.
+        Removing one would need git in a room of the repository that's no
+        session's own, its spawner's room and its own both gone: the host's
+        git runs the filters a room's commits pick and follows the links it
+        planted, and another session's room isn't theirs to run git in.
+        Whether it's merged is read with refs alone; a look that fails is
+        passed over, said in the service's log, for the next sweep.
         """
         served = self.served()
         launches = [each.launch for each in served]
-        sessions = [
-            *(each.session for each in served),
-            *(
-                each.resume or each.session
-                for each in self.launchers.spawning(self.layout)
-            ),
-            *(each.session for each in self.reserved),
-        ]
+        running = [(each.repository, each.session) for each in served]
         records = await asyncio.to_thread(self.recorded)
         for kept in records:
             spec = kept.spec
@@ -650,22 +659,31 @@ class SpawnTools(MutableModel, RoomTools, arbitrary_types_allowed=True):
                 or kept.stays is not None
                 or spawner.launch in launches
                 or spec.session is None
-                or spec.session in sessions
                 or spec.repository is None
+                or (spec.repository, spec.session) in running
             ):
                 continue
             if not await asyncio.to_thread(spec.worktree.is_dir, follow_symlinks=False):
                 continue
+            git = Git.pinned(spec.repository)
             try:
-                stays = await self.tidy(spec, spec.repository, kept.commit)
-            except (SpawnError, GitError) as failed:
+                unmerged = await self.unmerged(
+                    git, spec.repository, spec.worktree.name, kept.commit
+                )
+            except GitError as failed:
                 self.delivery.say(
-                    f"The worktree of side job {spec.session}, {spec.worktree}, "
-                    f"wasn't looked at: {failed}"
+                    f"The worktree of side job {spec.session}, {spec.worktree}, wasn't "
+                    f"looked at: {failed}"
                 )
                 continue
-            if stays is None:
-                continue
+            branches = approved_branches(self.layout, spec.repository)
+            stays = (
+                f"nothing on its branch `{spec.worktree.name}` is lost removing it, "
+                f"what it holds being on `{branches.integration}` or "
+                f"`{branches.running}`"
+                if unmerged is None
+                else unmerged
+            )
             write_model(
                 self.layout.spawned_session(segment(spec.session)),
                 kept.model_copy(update={"stays": stays}),
@@ -688,37 +706,23 @@ class SpawnTools(MutableModel, RoomTools, arbitrary_types_allowed=True):
 
         return list(read())
 
-    async def tidy(self, spec: HeldLaunch, repository: Path, commit: str) -> str | None:
-        """Remove `spec`'s worktree and its branch, a side job's started at `commit` in `repository`, where its branch is merged and nothing in it is uncommitted; return why it stays where it does, none where it went, or waits for a room of the repository that runs."""
-        branch = spec.worktree.name
-        if spec.worktree != made_root(repository, branch):
-            return "it isn't where lup makes a worktree, so lup leaves it"
-        git = Git.pinned(repository)
-        unmerged = await self.unmerged(git, repository, branch, commit)
-        if unmerged is not None:
-            return unmerged
-        room = self.room_of(repository, None)
-        if room is None:
-            # Nothing's lost waiting: a sweep that finds a room of it removes it.
-            return None
-        removed = await self.git_in(
-            room, repository, ["worktree", "remove", str(spec.worktree)]
-        )
-        if removed.status != 0:
-            said = removed.said() or f"git ended with status {removed.status}"
-            return f"git didn't remove it: {said}"
-        await self.git_in(room, repository, ["branch", "-D", branch])
-        return None
-
     async def unmerged(
         self, git: Git, repository: Path, branch: str, commit: str
     ) -> str | None:
-        """Say what of `branch`, started at `commit`, is on neither the integration branch nor the running one, as git pinned to `repository` reads their refs, the running one where the host computes it as it computed it (`running_tip`); none where it's all there, or the branch is gone."""
-        try:
-            tip = await started_at(git, branch, self.reading)
-        except SpawnError:
-            return None
-        if tip == commit:
+        """Say what of `branch`, started at `commit`, is on neither the integration branch nor the running one, as git pinned to `repository` reads their refs, the running one where the host computes it as it computed it (`running_tip`); none where it's all there, or the branch is gone. Raise `GitError` where git can't read them: none would take a failure for nothing to keep."""
+        found = await threaded(
+            repository,
+            git.run,
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            "--end-of-options",
+            f"refs/heads/{branch}^{{commit}}",
+            ok=[0, 1],
+            within=self.reading,
+        )
+        tip = found.output.decode().strip()
+        if found.status != 0 or not tip or tip == commit:
             return None
         branches = approved_branches(self.layout, repository)
         running = running_tip(self.layout, repository)
@@ -727,7 +731,7 @@ class SpawnTools(MutableModel, RoomTools, arbitrary_types_allowed=True):
             running or f"refs/heads/{branches.running}",
         ]
         for head in heads:
-            found = await threaded(
+            merged = await threaded(
                 repository,
                 git.run,
                 "merge-base",
@@ -735,10 +739,10 @@ class SpawnTools(MutableModel, RoomTools, arbitrary_types_allowed=True):
                 "--end-of-options",
                 tip,
                 head,
-                ok=[0, 1, 128],
+                ok=[0, 1],
                 within=self.reading,
             )
-            if found.status == 0:
+            if merged.status == 0:
                 return None
         return (
             f"its branch `{branch}` holds commits on neither "
@@ -746,7 +750,7 @@ class SpawnTools(MutableModel, RoomTools, arbitrary_types_allowed=True):
         )
 
     async def told_stays(self, spec: HeldLaunch, stays: str) -> None:
-        """Tell the operator once that a side job's worktree stays, though the launch that spawned it is gone, and why: a note from it, landing where it worked."""
+        """Tell the operator once that a side job's worktree stays, though the launch that spawned it is gone, and what it holds: a note from it, landing where it worked."""
         session = spec.session or spec.resume
         if session is None or spec.repository is None:
             return
@@ -756,23 +760,25 @@ class SpawnTools(MutableModel, RoomTools, arbitrary_types_allowed=True):
         who = self.delivery.roster().who(side)
         text = (
             f"lup: {who}'s worktree, {spec.worktree}, stays, though the launch that "
-            f"spawned it has ended: {stays}. It's yours to keep or remove."
+            f"spawned it has ended: {stays}. lup leaves it, and its branch, for you "
+            "to keep or remove."
         )
         await self.delivery.posted(
             Message(kind="note", text=text), side, Operator(), None
         )
 
-    async def remade(self, repository: Path, root: Path) -> None:
-        """Make a spawned session's worktree, gone, again at `root`, where it was in `repository`, by the repository's own git in a room of it that runs (`git_in`): on its branch, named as its worktree is, where that's still there, else on a new one of that name from the branch work starts from, its work having landed. Raise `SpawnError` where it can't be, saying why."""
+    async def remade(
+        self, repository: Path, root: Path, launch: Register | None
+    ) -> None:
+        """Make a spawned session's worktree, gone, again at `root`, where it was in `repository`, by the repository's own git in the room of `launch`, its spawner's asking (`git_in`): on its branch, named as its worktree is, where that's still there, else on a new one of that name from the branch work starts from, its work having landed. Raise `SpawnError` where it can't be, saying why: where no spawner of the repository asks, as where the operator's words restart it, no room is there that's theirs to run git in."""
         branch = root.name
         if root != made_root(repository, branch):
             message = f"its worktree, {root}, is gone, and wasn't one lup made"
             raise SpawnError(message)
-        room = self.room_of(repository, None)
-        if room is None:
+        if launch is None or launch.repository != repository:
             message = (
-                f"its worktree, {root}, is gone, and no session of its repository "
-                "runs, whose room would make it again"
+                f"its worktree, {root}, is gone, and only its spawner's room makes it "
+                "again: their `send` brings it back"
             )
             raise SpawnError(message)
         git = Git.pinned(repository)
@@ -783,12 +789,12 @@ class SpawnTools(MutableModel, RoomTools, arbitrary_types_allowed=True):
             start = self.starting(repository)
             commit = await started_at(git, start, self.reading)
             adding = ["-b", branch, str(root), commit]
-        pruned = await self.git_in(room, repository, ["worktree", "prune"])
+        pruned = await self.git_in(launch, repository, ["worktree", "prune"])
         ran = (
             pruned
             if pruned.status != 0
             else await self.git_in(
-                room, repository, ["worktree", "add", "--quiet", *adding]
+                launch, repository, ["worktree", "add", "--quiet", *adding]
             )
         )
         if ran.status != 0:
@@ -816,15 +822,17 @@ class SpawnTools(MutableModel, RoomTools, arbitrary_types_allowed=True):
     async def git_in(
         self, launch: Register, repository: Path, arguments: list[str]
     ) -> Ran:
-        """Run git with `arguments` on `repository`, for a spawn of `launch`, in a room of that repository's that runs (`room_of`), through `podman exec`, counted against that room's cap (`in_room`), never on the host and never in a room started for it: what it does there, that room could do itself, under the same walls, the host's environments and the files with a secret's name hidden from it. Return how it ended, whatever its status, 124 where it ran past `making`; raise `SpawnError` where no room of the repository runs, or it can't be run there, saying why."""
-        room = self.room_of(repository, launch)
-        if room is None or room.container is None:
-            message = (
-                "no session of that repository runs, whose room would run its git: "
-                "one launched there does"
-                if repository != launch.repository
-                else "your launch names no room to run its git in"
-            )
+        """Run git with `arguments` on `repository`, `launch`'s own, in `launch`'s room, the one asking, through `podman exec`, counted against its cap (`in_room`), and never on the host: what it does there, that room could do itself. Never in another session's room, whose own tools, login and lent directories what a room planted in the shared git directory would reach there; never in a room started for it, which wouldn't hide what a session's room hides from it.
+
+        Pinned to the git directory (`pinning`), its hooks and file monitor
+        off, so neither a `commondir` nor a `config` the room planted there
+        leads its git to run anything of the room's. Return how it ended,
+        whatever its status, 124 where it ran past `making`; raise `SpawnError`
+        where `launch` isn't the repository's, or names no room.
+        """
+        container = launch.container
+        if repository != launch.repository or container is None:
+            message = "your launch names no room of that repository to run its git in"
             raise SpawnError(message)
         program = Program(
             command=[
@@ -832,10 +840,13 @@ class SpawnTools(MutableModel, RoomTools, arbitrary_types_allowed=True):
                 "exec",
                 "--workdir",
                 str(repository),
-                room.container,
+                container,
+                *pinning(repository),
                 "git",
-                "--git-dir",
-                str(repository),
+                "-c",
+                "core.hooksPath=/dev/null",
+                "-c",
+                "core.fsmonitor=false",
                 *arguments,
             ],
             payload="",
@@ -843,20 +854,7 @@ class SpawnTools(MutableModel, RoomTools, arbitrary_types_allowed=True):
             within=self.making,
             kept=self.heard,
         )
-        return await self.in_room(room, program)
-
-    def room_of(self, repository: Path, launch: Register | None) -> Register | None:
-        """Return a launch the service serves whose room is `repository`'s, to run its git in: `launch`, where it's that repository's, else the first such by its id; none where none runs."""
-        if launch is not None and launch.repository == repository:
-            return launch
-        return next(
-            (
-                each
-                for each in sorted(self.served(), key=lambda each: each.launch)
-                if each.repository == repository and each.container is not None
-            ),
-            None,
-        )
+        return await self.in_room(launch, program)
 
     def limited(self, repository: Path) -> Reserved:
         """Count a spawn in `repository` against the limits, the host's and the repository's, and return it counted; refuse it past either, naming those that run.
@@ -948,11 +946,7 @@ class SpawnTools(MutableModel, RoomTools, arbitrary_types_allowed=True):
         """Make the spawn's worktree at `tree/<branch>` in `repository`'s git directory, on the branch `branch`, at `commit`, by the repository's own git in a room (`git_in`), stopped past `making`; raise `SpawnError` where no room can run it, or git fails or runs past it, saying why."""
         root = made_root(repository, branch)
         made = Made(repository=repository, root=root, branch=branch, commit=commit)
-        where = (
-            "your room"
-            if repository == launch.repository
-            else "a room of that repository's"
-        )
+        where = "your room"
         ran = await self.git_in(
             launch,
             repository,

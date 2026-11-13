@@ -822,7 +822,7 @@ def host_serve(context: typer.Context) -> None:
         reap=reap,
         rewake=delivery.rewoken,
         ended=partial(side_job_ended, holders, say=typer.echo),
-        tidy=spawning.tidied,
+        left=spawning.left,
     )
     turns = Turns()
     trying = Trying(
@@ -2428,13 +2428,13 @@ class Sweeping(MutableModel, Companion, arbitrary_types_allowed=True):
     ending: dict[str, asyncio.Task[None]] = {}
     """Each side job whose spawner's launch the service doesn't serve, by
     its launch, while its launcher is asked to end it."""
-    tidy: Callable[[], Awaitable[None]] | None = None
-    """Removes the worktree of each side job whose spawner's launch is gone
-    where nothing of it would be lost, and tells the operator once of each that
-    stays (`SpawnTools.tidied`); none tidies none."""
-    tidying: asyncio.Task[None] | None = None
-    """That tidy, while it runs: each room it starts may take minutes, which
-    the sweep doesn't wait on, and none starts beside it."""
+    left: Callable[[], Awaitable[None]] | None = None
+    """Tells the operator once of each side job's worktree left once the launch
+    that spawned it is gone, and what it holds (`SpawnTools.left`); none tells
+    nothing."""
+    leaving: asyncio.Task[None] | None = None
+    """That look, while it runs: git reads refs a room writes, within its
+    limits, which the sweep doesn't wait on, and none starts beside it."""
 
     @override
     async def begin(self) -> None:
@@ -2446,8 +2446,8 @@ class Sweeping(MutableModel, Companion, arbitrary_types_allowed=True):
         self.stopping.set()
         if self.task is not None:
             await self.task
-        if self.tidying is not None:
-            self.tidying.cancel()
+        if self.leaving is not None:
+            self.leaving.cancel()
 
     async def sweeping(self) -> None:
         """Sweep every `every`, until the service stops."""
@@ -2476,25 +2476,25 @@ class Sweeping(MutableModel, Companion, arbitrary_types_allowed=True):
         if self.reap is not None:
             await self.reap()
         await self.orphans_ended()
-        self.tidied()
+        self.looked_left()
         if self.rewake is not None:
             await self.rewake()
         self.woken()
 
-    def tidied(self) -> None:
-        """Start the tidy of side jobs' worktrees (`tidy`) apart, where none runs; where it fails, say why, with its traceback, and the next sweep starts it again."""
-        tidy = self.tidy
-        if tidy is None or (self.tidying is not None and not self.tidying.done()):
+    def looked_left(self) -> None:
+        """Start the look at side jobs' worktrees left (`left`) apart, where none runs; where it fails, say why, with its traceback, and the next sweep starts it again."""
+        left = self.left
+        if left is None or (self.leaving is not None and not self.leaving.done()):
             return
 
-        async def tidying() -> None:
+        async def leaving() -> None:
             try:
-                await tidy()
+                await left()
             except Exception as failed:
                 told = "".join(traceback.format_exception(failed))
-                self.say(f"The tidy of side jobs' worktrees failed:\n{told}")
+                self.say(f"The look at side jobs' worktrees left failed:\n{told}")
 
-        self.tidying = asyncio.create_task(tidying())
+        self.leaving = asyncio.create_task(leaving())
 
     async def orphans_ended(self) -> None:
         """Ask the launcher of each side job whose spawner's launch the service doesn't serve to end it, in the background, as that launch's end does (`Launches.close`): one that registered after its spawner ended, or whose spawner's end a restart cut short, would run on for nobody, its reports reaching someone gone. Where the launches can't be listed, say so; the next sweep looks again."""
@@ -3519,17 +3519,6 @@ def spawn_trial(
             "--model", help="The model the trial's session runs on, by its alias."
         ),
     ] = "haiku",
-    into: Annotated[
-        str | None,
-        typer.Option(
-            "--into",
-            help=(
-                "Another repository the trial's session spawns a side job in, by "
-                "the name your layer gives it with `spawn=True`, where a session of "
-                "it runs, whose room makes the side job's worktree."
-            ),
-        ),
-    ] = None,
 ) -> None:
     """Try a held session end to end, once, on this machine, and file the report in your inbox.
 
@@ -3537,8 +3526,8 @@ def spawn_trial(
     approved. In a scratch worktree beside this one, it starts a held session,
     sends it your words and sees its answer, interrupts a long turn, restarts
     the host service and sees the session survive, has it spawn a side job and
-    a builder, in another repository too with `--into`, ends it, restarts the
-    builder with a reply, sees the side job's worktree tidied, resumes it held,
+    a builder, ends it, restarts the builder with a reply, sees you told of the
+    side job's worktree left, resumes it held,
     has a terminal launch take it over, and resumes it held again; then it
     removes the scratch worktree and files what passed, what failed and what
     that means (`lup_dev.launch.trial`). It takes a few minutes, a few short
@@ -3585,7 +3574,6 @@ def spawn_trial(
             terminal=terminal,
             running=running,
             inside=inside,
-            into=into,
             clock=SystemClock(),
             say=typer.echo,
             worktree=scratch.path,

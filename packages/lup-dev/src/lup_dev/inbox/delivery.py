@@ -2669,7 +2669,11 @@ class Delivery(MutableModel, Post, arbitrary_types_allowed=True):
     async def hold_told(self, item: Item, said: str) -> None:
         """Tell the conversation that made held change `item` its answer, `said`, as the operator's news, no call being there to hear it."""
         await self.posted(
-            Message(kind="note", text=said), Operator(), item.sender, None
+            Message(kind="note", text=said),
+            Operator(),
+            item.sender,
+            None,
+            restarts=False,
         )
 
     def arrive(self, party: Conversation) -> None:
@@ -2687,8 +2691,9 @@ class Delivery(MutableModel, Post, arbitrary_types_allowed=True):
         call: str | None = None,
         quiet: bool = False,
         thread: Thread | None = None,
+        restarts: bool = True,
     ) -> Item:
-        """Make an item, its citations of the operator's words read where it's a conversation's own words to them (`cited`), put it in a thread where it's a conversation's to the operator (`landed`), and deliver it (`delivered`); `call` is the runtime's id for the agent's call that made it, where one did, `quiet` says it waits for a call (`Item.quiet`), and `thread` is the thread its call named, where it named one."""
+        """Make an item, its citations of the operator's words read where it's a conversation's own words to them (`cited`), put it in a thread where it's a conversation's to the operator (`landed`), and deliver it (`delivered`); `call` is the runtime's id for the agent's call that made it, where one did, `quiet` says it waits for a call (`Item.quiet`), `thread` is the thread its call named, where it named one, and `restarts` whether, the operator's, it restarts a spawned session that ended: not lup's word on one of their decisions."""
         made = self.inbox.made(
             reason,
             sender,
@@ -2700,7 +2705,7 @@ class Delivery(MutableModel, Post, arbitrary_types_allowed=True):
         )
         item = self.cited(made)
         self.landed(item, thread)
-        await self.delivered(item)
+        await self.delivered(item, restarts=restarts)
         return item
 
     async def copied(
@@ -2761,8 +2766,8 @@ class Delivery(MutableModel, Post, arbitrary_types_allowed=True):
         ):
             self.concerns().landed(item, thread)
 
-    async def delivered(self, item: Item) -> None:
-        """Tell the recipient that `item` reached their inbox: the operator through a desktop notice, a conversation through their held calls, or by waking them where the item isn't quiet: the operator's own, or a message another conversation sent them; and where it's the operator's and reaches a session an agent spawned that has ended, restart it (`restarted`)."""
+    async def delivered(self, item: Item, *, restarts: bool = True) -> None:
+        """Tell the recipient that `item` reached their inbox: the operator through a desktop notice, a conversation through their held calls, or by waking them where the item isn't quiet: the operator's own, or a message another conversation sent them; and where it's the operator's words, a message or an answer, `restarts` saying it isn't lup's word on a decision of theirs, and reaches a session an agent spawned that has ended, restart it (`restarted`)."""
         match item.recipient:
             case Operator():
                 await self.noticed(item)
@@ -2770,7 +2775,11 @@ class Delivery(MutableModel, Post, arbitrary_types_allowed=True):
                 self.arrive(conversation)
                 if not item.quiet:
                     await self.wake(conversation)
-                if isinstance(item.sender, Operator):
+                if (
+                    restarts
+                    and isinstance(item.sender, Operator)
+                    and isinstance(item.reason, Message | Answer)
+                ):
                     await self.restarted(item, conversation)
 
     async def restarted(self, item: Item, party: Conversation) -> None:
@@ -3428,6 +3437,7 @@ class Delivery(MutableModel, Post, arbitrary_types_allowed=True):
                     Operator(),
                     pusher,
                     None,
+                    restarts=False,
                 )
             case HeldChange(landing=AtLanding() as landing):
                 await self.landing_decided(
