@@ -62,9 +62,7 @@ line, a path or git, is held to this:
   podman's running. Nothing is held across either: a spawn is counted, and takes
   its branch, at once, between two awaits (`reserved`).
 
-What isn't covered: another repository, which the call can't name yet; and a
-spawn whose launcher fails after an approval restarted the service, which the
-spawner isn't told of, the service started since not knowing that launcher.
+What isn't covered: another repository, which the call can't name yet.
 """
 
 import asyncio
@@ -684,15 +682,16 @@ class SpawnTools(MutableModel, RoomTools, arbitrary_types_allowed=True):
         return ran
 
     async def lost(self, spec: HeldLaunch) -> None:
-        """Tell the agent who spawned `spec`'s launch that its session never came up, with the end of what its launcher wrote, as a problem from it: loud, so a spawner waiting on its report hears instead."""
+        """Tell the agent who spawned `spec`'s launch that its session never came up, naming its launcher's log, as a problem from it: loud, so a spawner waiting on its report hears instead. A session resumed so is the one it resumes."""
         spawner = spec.spawner
-        if spawner is None or spec.session is None:
+        session = spec.session or spec.resume
+        if spawner is None or session is None:
             return
         log = self.layout.launch(spec.launch).log
         child = Conversation(
             repository=spawner.conversation.repository,
             runtime=spec.runtime,
-            session=spec.session,
+            session=session,
         )
         # Not what the log says: it can name what's no room's to read, as
         # another repository's paths.

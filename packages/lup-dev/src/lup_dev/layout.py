@@ -754,7 +754,7 @@ class LaunchLayout(Model):
 
     @property
     def spawned(self) -> Path:
-        """What an agent's spawn started the launch's launcher with, and its process: kept while the launcher runs, so a service started again counts it against the limits before its launch registers (`Launchers.spawning`)."""
+        """What an agent's spawn started the launch's launcher with, its process, and whether its session came up: kept until the service sees the launcher gone, so a service started again counts it against the limits before its launch registers (`Launchers.spawning`), and tells its spawner where it never came up (`Launchers.reaped`)."""
         return self.directory.with_name(f"{self.directory.name}.spawned.json")
 
     @property

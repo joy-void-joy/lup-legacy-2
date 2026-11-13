@@ -37,6 +37,7 @@ from lup_dev.host.held import (
     Starting,
     launcher_command,
     launching,
+    never_up,
 )
 from lup_dev.host.holders import HeldEnd, HeldInterrupt, Holders
 from lup_dev.host.protocol import (
@@ -77,6 +78,7 @@ from lup_dev.launch.trial import (
     taking_over,
 )
 from lup_dev.layout import HostLayout, HostPaths, Layout
+from lup_dev.stored import write_model
 from lup_ledger.parties import Conversation, Operator, Party
 
 if TYPE_CHECKING:
@@ -120,7 +122,7 @@ def test_a_spawn_starts_its_launcher_and_its_await_answers_once_it_calls_its_ses
         ).answer(asking(tmp_path))
         assert isinstance(starting, Starting)
         # Called up before anyone awaits it, as a launcher may be.
-        await CallingUp(launchers=launchers).answer(
+        await CallingUp(layout=layout, launchers=launchers).answer(
             CalledUp(launch=starting.launch, name="dev", session="s-1")
         )
         awaited = await Awaiting(
@@ -151,7 +153,7 @@ def test_a_spawn_starts_its_launcher_and_its_await_answers_once_it_calls_its_ses
     launcher = launchers.started[spec.launch]
     launcher.process.kill()
     launcher.process.wait()
-    launchers.reaped()
+    launchers.reaped(layout)
     assert launchers.started == {}
     assert launchers.waiting == {}
 
@@ -210,7 +212,7 @@ def test_a_launcher_an_agent_s_spawn_started_is_counted_until_it_ends_and_one_ne
                 launch=launch, runtime="claude", worktree=tmp_path, spawner=spawner
             )
         )
-        await CallingUp(launchers=launchers).answer(
+        await CallingUp(layout=layout, launchers=launchers).answer(
             CalledUp(launch=up.launch, name="two", session="s-2")
         )
         counted = launchers.spawning(layout)
@@ -219,7 +221,7 @@ def test_a_launcher_an_agent_s_spawn_started_is_counted_until_it_ends_and_one_ne
             launcher = launchers.started[each.launch]
             launcher.process.kill()
             launcher.process.wait()
-        return counted, launchers.reaped()
+        return counted, launchers.reaped(layout)
 
     counted, lost = asyncio.run(spawned())
 
@@ -247,7 +249,7 @@ def test_a_spawn_abandoned_before_its_session_is_up_ends_its_launcher_and_one_up
         await Abandoning(launchers=launchers).answer(
             Abandon(launch=first.launch, pid=first.pid)
         )
-        await CallingUp(launchers=launchers).answer(
+        await CallingUp(layout=layout, launchers=launchers).answer(
             CalledUp(launch=second.launch, name="dev", session="s-1")
         )
         try:
@@ -1132,7 +1134,7 @@ def test_a_service_started_since_awaits_a_launcher_it_didn_t_start_by_its_proces
     awaiting = Awaiting(layout=layout, launchers=launchers, paths=paths, pause=yielded)
 
     async def awaited() -> tuple[Reply, Reply]:
-        await CallingUp(launchers=launchers).answer(
+        await CallingUp(layout=layout, launchers=launchers).answer(
             CalledUp(launch="a1", name="dev", session="s-1")
         )
         up = await awaiting.answer(AwaitHeld(launch="a1", pid=41))
@@ -1253,10 +1255,10 @@ def test_a_brief_told_twice_fails_its_spawn_step(
     )
 
 
-def test_a_launcher_a_service_before_started_for_a_spawn_is_counted_while_it_runs(
+def test_a_launcher_a_service_before_started_for_a_spawn_is_counted_while_it_runs_and_its_spawner_told_where_it_never_came_up(
     layout: Layout, tmp_path: Path
 ) -> None:
-    """Kept beside its lock: a service started since knows it by its process, and forgets it once that's gone."""
+    """Kept beside its lock: a service started since, as an approval starts one, knows it by its process while it runs; once that's gone it forgets it, handing back for its spawner to hear of the one whose session never came up, as the service before it said, and the one it was told came up itself."""
     spawner = Spawner(
         launch="s0",
         conversation=Conversation(
@@ -1265,12 +1267,12 @@ def test_a_launcher_a_service_before_started_for_a_spawn_is_counted_while_it_run
     )
     layout.launches.mkdir(parents=True)
 
-    def kept(launch: str, pid: int) -> None:
+    def kept(launch: str, pid: int, *, up: bool = False) -> None:
         spec = HeldLaunch(
             launch=launch, runtime="claude", worktree=tmp_path, spawner=spawner
         )
         layout.launch(launch).spawned.write_text(
-            SpawnedLauncher(spec=spec, pid=pid).model_dump_json()
+            SpawnedLauncher(spec=spec, pid=pid, up=up).model_dump_json()
         )
 
     # A program that keeps the launch's id among its arguments, as the
@@ -1282,24 +1284,59 @@ def test_a_launcher_a_service_before_started_for_a_spawn_is_counted_while_it_run
         "a1",
         log=tmp_path / "a1.log",
     )
-    gone = detached("true", "b1", log=tmp_path / "b1.log")
-    gone.process.wait()
+    gone = [
+        detached("true", launch, log=tmp_path / f"{launch}.log")
+        for launch in ["b1", "c1", "d1"]
+    ]
+    for each in gone:
+        each.process.wait()
     cmdline = Path("/proc") / str(running.process.pid) / "cmdline"
     for _ in range(600):
         if b"a1" in cmdline.read_bytes():
             break
         time.sleep(0.01)
+    never, up, heard = gone
     kept("a1", running.process.pid)
-    kept("b1", gone.process.pid)
+    kept("b1", never.process.pid)
+    kept("c1", up.process.pid, up=True)
+    kept("d1", heard.process.pid)
+    launchers = Launchers()
+
+    async def called() -> None:
+        await CallingUp(layout=layout, launchers=launchers).answer(
+            CalledUp(launch="d1", name="four", session="s-4")
+        )
+
+    asyncio.run(called())
     try:
-        counted = Launchers().spawning(layout)
+        counted = launchers.spawning(layout)
+        lost = launchers.reaped(layout)
     finally:
         running.process.kill()
         running.process.wait()
 
     assert [each.launch for each in counted] == ["a1"]
+    assert [each.launch for each in lost] == ["b1"]
     assert layout.launch("a1").spawned.exists()
-    assert not layout.launch("b1").spawned.exists()
+    for launch in ["b1", "c1", "d1"]:
+        assert not layout.launch(launch).spawned.exists()
+
+
+def test_a_spawn_s_launcher_keeps_its_log_where_its_session_never_came_up(
+    layout: Layout, tmp_path: Path
+) -> None:
+    """Its spawner is told the log names why: one up, or the operator's own, has no such reader."""
+    layout.launches.mkdir(parents=True)
+    spec = HeldLaunch(launch="a1", runtime="claude", worktree=tmp_path)
+    write_model(layout.launch("a1").spawned, SpawnedLauncher(spec=spec, pid=1))
+    write_model(
+        layout.launch("b1").spawned,
+        SpawnedLauncher(spec=spec.model_copy(update={"launch": "b1"}), pid=1, up=True),
+    )
+
+    assert never_up(layout, "a1")
+    assert not never_up(layout, "b1")
+    assert not never_up(layout, "c1")
 
 
 def test_a_side_job_whose_spawner_s_launch_isn_t_served_is_orphaned_and_a_builder_isn_t() -> (

@@ -129,6 +129,7 @@ from lup_dev.host.held import (
     Spawning,
     Starting,
     launcher_command,
+    never_up,
 )
 from lup_dev.host.held import Ending as HeldEnding
 from lup_dev.host.held import Interrupting as HeldInterrupting
@@ -706,7 +707,7 @@ def held_routes(
         Route.to(Spawning(layout=layout, launchers=launchers, start=launcher_started)),
         Route.to(Awaiting(layout=layout, launchers=launchers)),
         Route.to(Abandoning(launchers=launchers)),
-        Route.to(CallingUp(launchers=launchers, up=up, say=typer.echo)),
+        Route.to(CallingUp(layout=layout, launchers=launchers, up=up, say=typer.echo)),
         Route.to(HeldInterrupting(holders=holders)),
         Route.to(HeldEnding(holders=holders)),
     ]
@@ -806,7 +807,7 @@ def host_serve(context: typer.Context) -> None:
     delivery.resumer = spawning.resumed
 
     async def reap() -> None:
-        for each in launchers.reaped():
+        for each in launchers.reaped(layout):
             await spawning.lost(each)
 
     sweeping = Sweeping(
@@ -2407,7 +2408,8 @@ class Sweeping(MutableModel, Companion, arbitrary_types_allowed=True):
     giving it having failed (`Delivery.rewoken`); none gives nothing."""
     reap: Callable[[], Awaitable[None]] | None = None
     """Collects each held launch's launcher the service started that has
-    ended, so none is left a zombie, and tells the agent who spawned one whose
+    ended, so none is left a zombie, forgets each a service before it started
+    for an agent's spawn that's gone, and tells the agent who spawned one whose
     session never came up (`Launchers.reaped`, `SpawnTools.lost`); none
     collects none."""
     ended: Callable[[Register], Coroutine[None, None, None]] | None = None
@@ -2938,9 +2940,8 @@ def launched(
                         ended(launcher, launch)
                         for line in [*environments.end(), *hiding.end()]:
                             launcher.say(line)
-                        if held is not None:
+                        if held is not None and not never_up(launcher.layout, launch):
                             own.log.unlink(missing_ok=True)
-                            own.spawned.unlink(missing_ok=True)
         finally:
             own.lock.unlink(missing_ok=True)
             if writing is not None and writer is not None:
