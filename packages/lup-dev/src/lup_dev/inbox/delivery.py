@@ -985,11 +985,17 @@ class Delivery(MutableModel, Post, arbitrary_types_allowed=True):
     resumer: Callable[[Conversation, Conversation, Register], Awaitable[str]] | None = (
         None
     )
-    """Resumes a side job that ended, its session held again with its context,
-    where its spawner sends it a message: the side job, the spawner, and their
-    launch in; what to add to `send`'s answer out, empty where it's none of the
-    spawner's to resume (`SpawnTools.resumed`, which `cli.py` gives). None
-    resumes nothing."""
+    """Resumes a session an agent spawned that ended, its session held again
+    with its context, where its spawner sends it a message: the session, the
+    spawner, and their launch in; what to add to `send`'s answer out, empty
+    where it's none of the spawner's to resume (`SpawnTools.resumed`, which
+    `cli.py` gives). None resumes nothing."""
+    restarter: Callable[[Conversation], Awaitable[str | None]] | None = None
+    """Restarts a session an agent spawned that ended, its session held again
+    with its context, where the operator's words reach it: its own
+    conversation in; why it isn't restarted out, none where it is, runs, or no
+    agent spawned it (`SpawnTools.restarted`, which `cli.py` gives). None
+    restarts nothing."""
     ending: list[asyncio.Task[None]] = []
     """Each side job's end asked of its launcher at its report, kept until it's
     answered."""
@@ -2745,7 +2751,7 @@ class Delivery(MutableModel, Post, arbitrary_types_allowed=True):
             self.concerns().landed(item, thread)
 
     async def delivered(self, item: Item) -> None:
-        """Tell the recipient that `item` reached their inbox: the operator through a desktop notice, a conversation through their held calls, or by waking them where the item isn't quiet: the operator's own, or a message another conversation sent them."""
+        """Tell the recipient that `item` reached their inbox: the operator through a desktop notice, a conversation through their held calls, or by waking them where the item isn't quiet: the operator's own, or a message another conversation sent them; and where it's the operator's and reaches a session an agent spawned that has ended, restart it (`restarted`)."""
         match item.recipient:
             case Operator():
                 await self.noticed(item)
@@ -2753,6 +2759,23 @@ class Delivery(MutableModel, Post, arbitrary_types_allowed=True):
                 self.arrive(conversation)
                 if not item.quiet:
                     await self.wake(conversation)
+                if isinstance(item.sender, Operator):
+                    await self.restarted(item, conversation)
+
+    async def restarted(self, item: Item, party: Conversation) -> None:
+        """Restart `party`, a session's own conversation an agent spawned that has ended, the operator's `item` waiting for them as their first turn once they're up (`restarter`); where they can't be, tell the operator why, as a problem from them, in the concern they worked in, so the operator's words aren't left waiting on nobody unsaid."""
+        restarter = self.restarter
+        if restarter is None or party.agent is not None or self.concerns().live(party):
+            return
+        unstarted = await restarter(party)
+        if unstarted is None:
+            return
+        who = self.roster().who(party)
+        text = (
+            f"lup: {who} had ended, and your words in {cited(item.number)} didn't "
+            f"restart them: {unstarted}."
+        )
+        await self.posted(Message(kind="problem", text=text), party, Operator(), None)
 
     def wakes(self, party: Conversation) -> bool:
         """Say whether `party`'s session can be woken idle at all: their runtime spells a push or a line for its messaging socket (`Waker`); not where its adapter declares neither."""

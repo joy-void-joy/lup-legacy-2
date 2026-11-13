@@ -1406,7 +1406,7 @@ def test_the_sweep_removes_what_a_side_job_was_started_with_once_its_worktree_is
     kept.mkdir()
     linked.symlink_to(kept)
     for session, worktree in [("c1", kept), ("c2", gone), ("c4", linked)]:
-        record = layout.side_job(session)
+        record = layout.spawned_session(session)
         record.parent.mkdir(parents=True, exist_ok=True)
         record.write_text(
             HeldLaunch(
@@ -1416,7 +1416,7 @@ def test_the_sweep_removes_what_a_side_job_was_started_with_once_its_worktree_is
                 session=session,
             ).model_dump_json()
         )
-    layout.side_job("c3").write_text("{")
+    layout.spawned_session("c3").write_text("{")
     said: list[str] = []
     host, _ = played(tmp_path, clock)
     sweeping = cli.Sweeping(
@@ -1425,7 +1425,9 @@ def test_the_sweep_removes_what_a_side_job_was_started_with_once_its_worktree_is
 
     sweeping.forgotten()
 
-    assert sorted(each.stem for each in layout.side_jobs.glob("*.json")) == ["c1"]
+    assert sorted(each.stem for each in layout.spawned_sessions.glob("*.json")) == [
+        "c1"
+    ]
     assert said == [
         f"What side job c2 was started with is removed: its worktree, {gone}, is gone.",
         "What side job c3 was started with is removed: it didn't read.",

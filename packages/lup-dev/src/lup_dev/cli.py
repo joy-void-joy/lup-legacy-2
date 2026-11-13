@@ -805,6 +805,7 @@ def host_serve(context: typer.Context) -> None:
     delivery.starting = coming.started
     spawning = spawn_tools(delivery, layout, launchers, known)
     delivery.resumer = spawning.resumed
+    delivery.restarter = spawning.restarted
 
     async def reap() -> None:
         for each in launchers.reaped(layout):
@@ -2492,14 +2493,14 @@ class Sweeping(MutableModel, Companion, arbitrary_types_allowed=True):
             )
 
     def forgotten(self) -> None:
-        """Remove what each side job was started with where its worktree is gone, so nothing resumes it again (`Layout.side_job`, `SpawnTools.resumed`), or where it doesn't read, saying each; what can't be read or removed is said, and the next sweep looks again.
+        """Remove what each session an agent spawned was started with where its worktree is gone, so nothing resumes it again (`Layout.spawned_session`, `SpawnTools.resumed`, `SpawnTools.restarted`), or where it doesn't read, saying each; what can't be read or removed is said, and the next sweep looks again.
 
         Run off the event loop, for `forgetting` at most (`forgot`): the
         worktrees are paths a room writes. One that's a link is taken for gone,
         never followed.
         """
         try:
-            kept = sorted(self.layout.side_jobs.glob("*.json"))
+            kept = sorted(self.layout.spawned_sessions.glob("*.json"))
         except OSError as unread:
             self.say(f"What side jobs were started with wasn't looked at: {unread}")
             return

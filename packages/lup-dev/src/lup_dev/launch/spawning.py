@@ -81,7 +81,7 @@ from lup.tools.tool import Accepted, AgentTool, ToolSpec
 from lup.tools.tool import Refused as Rejected
 from lup.types import Model, MutableModel
 from lup_dev.git import Git, GitError, threaded
-from lup_dev.host.held import HeldLaunch, Launchers, Spawning
+from lup_dev.host.held import HeldLaunch, Launchers, Spawning, Starting
 from lup_dev.host.protocol import Register, Spawner, branch_name, segment
 from lup_dev.host.rooms import RoomTools
 from lup_dev.host.service import Program, executed
@@ -89,6 +89,7 @@ from lup_dev.inbox.delivery import Delivery
 from lup_dev.inbox.store import InboxError, Message
 from lup_dev.layout import Layout
 from lup_dev.policy.worktrees import branch_named, made_root
+from lup_dev.stored import write_model
 from lup_ledger.parties import Conversation
 from lup_ledger.threads import Thread
 
@@ -185,11 +186,14 @@ class SpawnCall(Model, arbitrary_types_allowed=True):
 
 
 class Reserved(Model):
-    """A spawn under way: its repository's git directory, and the branch it took, once it took one."""
+    """A spawn under way: its repository's git directory, the branch it took, once it took one, and the session it resumes, where it resumes one."""
 
     token: str
     repository: Path
     branch: str | None = None
+    session: str | None = None
+    """The runtime's id for the session it resumes, so no two launches resume
+    one at once."""
 
 
 class SpawnTools(MutableModel, RoomTools, arbitrary_types_allowed=True):
@@ -411,66 +415,118 @@ class SpawnTools(MutableModel, RoomTools, arbitrary_types_allowed=True):
                 f"{await self.unmade(launch, made)}{opened(thread)}"
             )
             raise SpawnError(message) from unsent
-        if handed is None:
-            kept = self.layout.side_job(session)
-            kept.parent.mkdir(parents=True, exist_ok=True)
-            kept.write_text(self.launchers.specs[starting.launch].model_dump_json())
+        write_model(
+            self.layout.spawned_session(session),
+            self.launchers.specs[starting.launch],
+        )
         return said(made, start, sent.number, starting.log, handed)
 
     async def resumed(
-        self, side: Conversation, spawner: Conversation, launch: Register
+        self, ended: Conversation, spawner: Conversation, launch: Register
     ) -> str:
-        """Resume `side`, a side job `spawner`, of `launch`, spawned, that ended at its report, its session held again in its worktree with its context, as `lup-dev spawn --resume` holds one, the message they just sent it waiting for its call-up; say how it went, after `send`'s answer, or nothing where it's no ended side job of theirs.
+        """Resume `ended`, a session `spawner`, of `launch`, spawned, that has ended, a side job at its report or a builder the operator ended, its session held again in its worktree with its context, as `lup-dev spawn --resume` holds one, the message they just sent it waiting for its call-up; say how it went, after `send`'s answer, or nothing where it runs, or is none of theirs.
 
-        What it was started with is kept by the host as it's spawned
-        (`Layout.side_job`), by the session's id lup minted, so nothing a room
-        says names its worktree; its spawner is recorded again as the
-        conversation that sent, of the launch they send from. It counts
-        against the limits as a spawn does.
+        Its spawner is recorded again as the conversation that sent, of the
+        launch they send from, the concern a builder was handed kept.
         """
+        spec = self.kept(ended)
+        if spec is None or spec.spawner is None:
+            return ""
+        if spec.spawner.conversation != spawner:
+            return ""
+        how = (
+            "It ended at its report" if spec.spawner.concern is None else "It had ended"
+        )
+        again = spec.spawner.model_copy(update={"launch": launch.launch})
         try:
-            kept = self.layout.side_job(segment(side.session))
-            spec = HeldLaunch.model_validate_json(kept.read_text())
+            starting = await self.relaunched(spec, ended, again, modelled(launch.model))
+        except SpawnError as refused:
+            return f" {how}, and isn't resumed: {refused}."
+        if starting is None:
+            return ""
+        return (
+            f" {how}: it's resumed held in {spec.worktree}, with all it knew, your "
+            f"message its first turn once it's up; its launcher writes to "
+            f"{starting.log}."
+        )
+
+    async def restarted(self, ended: Conversation) -> str | None:
+        """Restart `ended`, a session an agent spawned that has ended, its session held again in its worktree with its context, as `lup-dev spawn --resume` holds one, where the operator's words reached it, which wait for its call-up; say why not where it can't be, and nothing where it is, it runs, or no agent spawned it.
+
+        It answers to the spawner it was spawned by, as recorded then, the
+        concern a builder was handed kept, and runs on the arguments it was
+        spawned with.
+        """
+        spec = self.kept(ended)
+        if spec is None or spec.spawner is None:
+            return None
+        try:
+            await self.relaunched(spec, ended, spec.spawner, spec.arguments)
+        except SpawnError as refused:
+            return str(refused)
+        return None
+
+    def kept(self, ended: Conversation) -> HeldLaunch | None:
+        """Return what `ended`, a session's own conversation, was started with where an agent spawned it, as the host kept it (`Layout.spawned_session`), by the session's id lup minted, so nothing a room says names its worktree; none for a subagent, or where nothing's kept or it doesn't read."""
+        if ended.agent is not None:
+            return None
+        try:
+            kept = self.layout.spawned_session(segment(ended.session))
+            return HeldLaunch.model_validate_json(kept.read_text())
         except ValueError, OSError:
-            return ""
-        if spec.spawner is None or spec.spawner.conversation != spawner:
-            return ""
-        if any(each.session == side.session for each in self.served()):
-            return ""
-        if not spec.worktree.is_dir():
-            return (
-                f" It ended at its report, and its worktree, {spec.worktree}, is "
-                "gone, so it isn't resumed."
-            )
+            return None
+
+    async def relaunched(
+        self,
+        spec: HeldLaunch,
+        ended: Conversation,
+        spawner: Spawner,
+        arguments: list[str],
+    ) -> Starting | None:
+        """Start a launcher resuming `ended`, spawned as `spec` says, held in its worktree, answering to `spawner`, on `arguments`, counted against the limits as a spawn is, and return it starting; none where a launch runs it, or one is starting on it. Raise `SpawnError` where it can't be resumed, saying why.
+
+        Whether a launch runs it or starts on it, and its count, are read and
+        taken with nothing awaited between, so two at once start one.
+        """
+        session = ended.session
+        starting = [
+            each.resume or each.session for each in self.launchers.spawning(self.layout)
+        ]
+        if (
+            any(each.session == session for each in self.served())
+            or session in starting
+            or any(each.session == session for each in self.reserved)
+        ):
+            return None
+        if not spec.worktree.is_dir(follow_symlinks=False):
+            message = f"its worktree, {spec.worktree}, is gone"
+            raise SpawnError(message)
+        reserved = self.limited(spec.repository or ended.repository)
+        self.reserved = [
+            each.model_copy(update={"session": session})
+            if each.token == reserved.token
+            else each
+            for each in self.reserved
+        ]
         try:
-            reserved = self.limited(spec.repository or launch.repository)
-        except SpawnError as limited:
-            return f" It ended at its report, and isn't resumed: {limited}"
-        try:
-            starting = await self.spawning.started(
+            return await self.spawning.started(
                 lambda minted: spec.model_copy(
                     update={
                         "launch": minted,
                         "session": None,
-                        "resume": side.session,
-                        "spawner": Spawner(launch=launch.launch, conversation=spawner),
-                        "arguments": modelled(launch.model),
+                        "resume": session,
+                        "spawner": spawner,
+                        "arguments": arguments,
                     }
                 )
             )
         except (ProgramError, OSError) as unstarted:
-            return (
-                f" It ended at its report, and its launcher didn't start: {unstarted}"
-            )
+            message = f"its launcher didn't start: {unstarted}"
+            raise SpawnError(message) from unstarted
         finally:
             self.reserved = [
                 each for each in self.reserved if each.token != reserved.token
             ]
-        return (
-            f" It ended at its report: it's resumed held in {spec.worktree}, with "
-            "all it knew, your message its first turn once it's up; its launcher "
-            f"writes to {starting.log}."
-        )
 
     async def unmade(self, launch: Register, made: Made) -> str:
         """Remove a spawn's worktree and branch, which nothing ran in yet, by the spawner's room's own git, stopped past `making`, and say how it went, to follow a refusal's reason."""

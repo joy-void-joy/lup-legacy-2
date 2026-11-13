@@ -12,6 +12,7 @@ import contextlib
 import gc
 import json
 import os
+import shutil
 import socket
 import sys
 import threading
@@ -575,6 +576,7 @@ def inboxed(
         else spawning(delivery, launchers)
     )
     delivery.resumer = spawner.resumed
+    delivery.restarter = spawner.restarted
     landing = LandingTools(
         delivery=delivery,
         layout=judging or machine,
@@ -15717,6 +15719,186 @@ def test_a_side_job_ends_at_its_report_and_its_spawner_s_send_resumes_it(
         "your message its first turn once it's up; its launcher writes to "
         f"{machine.launch(resumed.launch).log}."
     )
+
+
+def builder_ended(
+    machine: Layout,
+    clock: FakeClock,
+    delivery: Delivery,
+    spawned: SpawnsMade,
+    repository: Path,
+    *,
+    kept: bool = True,
+) -> tuple[HeldLaunch, Conversation, int]:
+    """Spawn a builder handed `Revamp` through the tool from launch `one`, register its launch as its launcher would, held, let it end a turn and its launch end: what it was started with, its session's conversation, and its turn's end before the operator. Its worktree stays where `kept` says, else it's removed once it ended, as a landing removes a landed branch's."""
+    mcp = machine.host.launch("one").mcp
+    answer, _ = call(
+        mcp, "spawn", {"name": "x", "brief": "Build it.", "concern": "Revamp"}
+    )
+    assert answer.startswith("`x` is starting"), answer
+    [spec] = spawned.launches
+    assert spec.session is not None
+    spec.worktree.mkdir(parents=True, exist_ok=True)
+    launched(
+        machine,
+        clock,
+        spec.worktree,
+        spec.launch,
+        "claude",
+        repository=repository,
+        held=True,
+        spawner=spec.spawner,
+    )
+    theirs = machine.host.launch(spec.launch).hook
+    send(theirs, claude("SessionStart", source="startup", session_id=spec.session))
+    send(
+        theirs,
+        claude(
+            "Stop",
+            stop_hook_active=False,
+            last_assistant_message="The tabs are built.",
+            session_id=spec.session,
+        ),
+    )
+    ending = newest(delivery)
+    client(machine.host, clock).unregister(spec.launch)
+    if not kept:
+        shutil.rmtree(spec.worktree)
+    child = Conversation(repository=repository, runtime="claude", session=spec.session)
+    return spec, child, ending
+
+
+def test_the_operator_s_reply_restarts_an_ended_builder_held_in_its_worktree_answering_to_its_spawner(
+    machine: Layout, clock: FakeClock, notices: Raised, said: list[str], tmp_path: Path
+) -> None:
+    """Their words wait for its call-up, its first turn; it resumes with all it knew, as `lup-dev spawn --resume` holds one, its spawner and concern as recorded, on the arguments it was spawned with."""
+    worktree = tmp_path / "w"
+    spawnable(worktree)
+    repository = worktree / ".git"
+    spawned = SpawnsMade()
+    with inboxed(
+        machine,
+        clock,
+        notices,
+        said,
+        holding=True,
+        spawning=lambda delivery, launchers: spawned.tools(
+            delivery, machine, launchers
+        ),
+    ) as delivery:
+        launched(machine, clock, worktree, "one", "claude", model="haiku")
+        send(machine.host.launch("one").hook, claude("SessionStart", source="startup"))
+        spec, child, ending = builder_ended(
+            machine, clock, delivery, spawned, repository
+        )
+        inbox("answer", str(ending), "--comment", "The keys too.")
+        reply = newest(delivery)
+    [_, restarted] = spawned.launches
+    assert restarted.resume == child.session
+    assert restarted.session is None
+    assert restarted.worktree == spec.worktree
+    assert restarted.spawner == spec.spawner
+    assert restarted.spawner is not None
+    assert restarted.spawner.concern is not None
+    assert restarted.arguments == ["--model", "haiku"]
+    item = delivery.inbox.item(reply)
+    assert item.recipient == child
+    assert item.state == Waiting()
+
+
+def test_a_spawner_s_send_resumes_an_ended_builder_keeping_the_concern_it_handed(
+    machine: Layout, clock: FakeClock, notices: Raised, said: list[str], tmp_path: Path
+) -> None:
+    worktree = tmp_path / "w"
+    spawnable(worktree)
+    repository = worktree / ".git"
+    spawned = SpawnsMade()
+    with inboxed(
+        machine,
+        clock,
+        notices,
+        said,
+        holding=True,
+        spawning=lambda delivery, launchers: spawned.tools(
+            delivery, machine, launchers
+        ),
+    ) as delivery:
+        launched(machine, clock, worktree, "one", "claude")
+        mcp = machine.host.launch("one").mcp
+        send(machine.host.launch("one").hook, claude("SessionStart", source="startup"))
+        spec, child, _ = builder_ended(machine, clock, delivery, spawned, repository)
+        answer, _ = call(mcp, "send", {"to": "x", "kind": "note", "text": "And keys."})
+    [_, resumed] = spawned.launches
+    assert resumed.resume == child.session
+    assert resumed.spawner == spec.spawner
+    assert answer.endswith(
+        f"It had ended: it's resumed held in {spec.worktree}, with all it knew, "
+        "your message its first turn once it's up; its launcher writes to "
+        f"{machine.launch(resumed.launch).log}."
+    )
+
+
+def test_the_operator_s_reply_to_an_ended_builder_it_can_t_restart_is_said_to_them(
+    machine: Layout, clock: FakeClock, notices: Raised, said: list[str], tmp_path: Path
+) -> None:
+    """Their words would otherwise wait on nobody, unsaid: the problem comes from the builder, in lup's words."""
+    worktree = tmp_path / "w"
+    spawnable(worktree)
+    repository = worktree / ".git"
+    spawned = SpawnsMade()
+    with inboxed(
+        machine,
+        clock,
+        notices,
+        said,
+        holding=True,
+        spawning=lambda delivery, launchers: spawned.tools(
+            delivery, machine, launchers
+        ),
+    ) as delivery:
+        launched(machine, clock, worktree, "one", "claude")
+        send(machine.host.launch("one").hook, claude("SessionStart", source="startup"))
+        spec, child, ending = builder_ended(
+            machine, clock, delivery, spawned, repository, kept=False
+        )
+        inbox("answer", str(ending), "--comment", "The keys too.")
+        reply, problem = numbers(delivery)[-2:]
+    assert len(spawned.launches) == 1
+    item = delivery.inbox.item(problem)
+    assert (item.sender, item.recipient) == (child, Operator())
+    assert item.reason == Message(
+        kind="problem",
+        text=(
+            f"lup: `x` had ended, and your words in @{reply} didn't "
+            f"restart them: its worktree, {spec.worktree}, is gone."
+        ),
+    )
+
+
+def test_the_operator_s_words_to_a_session_no_agent_spawned_restart_nothing(
+    machine: Layout, clock: FakeClock, notices: Raised, said: list[str], tmp_path: Path
+) -> None:
+    spawned = SpawnsMade()
+    with inboxed(
+        machine,
+        clock,
+        notices,
+        said,
+        holding=True,
+        spawning=lambda delivery, launchers: spawned.tools(
+            delivery, machine, launchers
+        ),
+    ) as delivery:
+        launched(machine, clock, tmp_path, "one", "claude")
+        hook = machine.host.launch("one").hook
+        send(hook, claude("SessionStart", source="startup"))
+        send(hook, claude("Stop", stop_hook_active=False, last_assistant_message="Hi."))
+        ending = newest(delivery)
+        client(machine.host, clock).unregister("one")
+        inbox("answer", str(ending), "--comment", "Hello.")
+        reply = newest(delivery)
+    assert spawned.launches == []
+    assert delivery.inbox.item(reply).state == Waiting()
 
 
 # What a room can do to the host service through the session lup holds for it,
