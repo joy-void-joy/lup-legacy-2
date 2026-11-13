@@ -85,6 +85,7 @@ from lup_dev.inbox.protocol import (
 )
 from lup_dev.inbox.store import Message, Told
 from lup_dev.inbox.texts import written
+from lup_dev.launch.hidden import removed
 from lup_dev.launch.room import repository
 from lup_ledger.parties import Conversation, Operator
 
@@ -1271,40 +1272,31 @@ def scratch_worktree(beside: Path, git: Git, name: str, commit: str) -> Path:
 
 
 class Scratch(Model):
-    """The trial's scratch worktree: where it is, the repository's common git directory, and git pinned there, which made it and removes it."""
+    """The trial's scratch worktree: where it is, the repository's common git directory and the tree a room mounts for it, and git pinned there, which made it."""
 
     path: Path
     repository: Path
+    tree: Path
+    """The tree every room of the repository mounts, which holds the scratch
+    worktree and each one its session spawned, and which rooms write."""
     git: Git
 
     def removed(self) -> None:
-        """Remove the worktree, whatever is in it, given as long as git removing a whole worktree is (`Git.whole`)."""
-        self.git.run(
-            "worktree", "remove", "--force", str(self.path), within=self.git.whole
-        )
+        """Remove the worktree, whatever is in it, by the host walking it from the tree without following a link (`hidden.removed`), then git's record of it, pruned: a room could link the path to another worktree, which git's own removal would follow."""
+        removed(self.tree, self.path)
+        self.git.run("worktree", "prune", within=self.git.whole)
 
     def unspawned(self, spawned: list[Register], say: Callable[[str], None]) -> None:
-        """Remove the worktree and the branch of each launch the trial's session spawned, whatever is in them, each under `tree/` of its repository, this one's or another's, and named for its branch (`made_root`), by git pinned to that repository, the removal given as long as git removing a whole worktree is (`Git.whole`); one the sweep removed already is passed over; where git can't, say so, and go on."""
+        """Remove the worktree and the branch of each launch the trial's session spawned, whatever is in them, each under `tree/` of the repository and named for its branch (`made_root`): the worktree walked from the tree without following a link (`hidden.removed`), git's record of it pruned, and its branch deleted, by git pinned to the repository; where git can't, say so, and go on."""
         # A side job resumed holds the worktree it was spawned in: each once.
         for each in {launch.worktree: launch for launch in spawned}.values():
-            if each.worktree.parent != each.repository / "tree":
+            if each.worktree.parent != self.repository / "tree":
                 say(f"{each.worktree} isn't one a spawn made, so it's left.")
                 continue
-            git = (
-                self.git
-                if each.repository == self.repository
-                else Git.pinned(each.repository)
-            )
             try:
-                if each.worktree.exists():
-                    git.run(
-                        "worktree",
-                        "remove",
-                        "--force",
-                        str(each.worktree),
-                        within=git.whole,
-                    )
-                branch = git.run(
+                removed(self.tree, each.worktree)
+                self.git.run("worktree", "prune", within=self.git.whole)
+                branch = self.git.run(
                     "rev-parse",
                     "--verify",
                     "--quiet",
@@ -1313,8 +1305,8 @@ class Scratch(Model):
                     ok=[0, 1],
                 )
                 if branch.status == 0:
-                    git.run("branch", "-D", "--end-of-options", each.worktree.name)
-            except GitError as failed:
+                    self.git.run("branch", "-D", "--end-of-options", each.worktree.name)
+            except (GitError, OSError) as failed:
                 say(
                     f"{each.worktree}, which the trial's session spawned in, stays: {failed}"
                 )
@@ -1340,10 +1332,12 @@ def scratched(
     scratch = Scratch(
         path=scratch_worktree(root.parent, git, name, commit),
         repository=found.git,
+        tree=found.tree,
         git=git,
     )
     if repository(scratch.path, found.git).tree != found.tree:
-        scratch.removed()
+        # Outside what any room mounts, so no room wrote it: git's own removal.
+        git.run("worktree", "remove", "--force", str(scratch.path), within=git.whole)
         message = (
             f"a worktree at {scratch.path} would widen what a room of the "
             "repository mounts: run the trial from a worktree that has siblings, "

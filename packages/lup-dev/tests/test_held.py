@@ -1271,7 +1271,9 @@ def test_the_trial_removes_the_worktree_and_branch_of_each_launch_its_session_sp
         commit,
     )
     said: list[str] = []
-    scratch = Scratch(path=main, repository=repository, git=Git.pinned(repository))
+    scratch = Scratch(
+        path=main, repository=repository, tree=tmp_path, git=Git.pinned(repository)
+    )
     outside = held("elsewhere").model_copy(update={"worktree": tmp_path / "elsewhere"})
 
     side = held("side").model_copy(update={"worktree": made, "repository": repository})
@@ -1385,6 +1387,41 @@ def test_a_spawn_s_launcher_keeps_its_log_where_its_session_never_came_up(
     assert never_up(layout, "a1")
     assert not never_up(layout, "b1")
     assert not never_up(layout, "c1")
+
+
+def test_the_trial_s_cleanup_follows_no_link_a_room_planted_at_a_spawned_worktree(
+    tmp_path: Path, shell: Shell
+) -> None:
+    """A room writes `tree/`, so the path of a worktree its session spawned can be a link to another worktree, which git's own removal would find by its real path and remove."""
+    repository, main, commit = repository_with_a_worktree(tmp_path, shell)
+    precious = tmp_path / "elsewhere"
+    shell.git(
+        tmp_path,
+        "--git-dir",
+        str(repository),
+        "worktree",
+        "add",
+        "-q",
+        "--no-checkout",
+        "-b",
+        "kept",
+        str(precious),
+        commit,
+    )
+    (precious / "precious.txt").write_text("keep me\n")
+    made = repository / "tree" / "trial-side-job"
+    made.parent.mkdir(exist_ok=True)
+    made.symlink_to(precious)
+    said: list[str] = []
+    scratch = Scratch(
+        path=main, repository=repository, tree=tmp_path, git=Git.pinned(repository)
+    )
+    side = held("side").model_copy(update={"worktree": made, "repository": repository})
+
+    scratch.unspawned([side], said.append)
+
+    assert (precious / "precious.txt").read_text() == "keep me\n"
+    assert not made.is_symlink()
 
 
 def test_a_side_job_whose_spawner_s_launch_isn_t_served_is_orphaned_and_a_builder_isn_t() -> (

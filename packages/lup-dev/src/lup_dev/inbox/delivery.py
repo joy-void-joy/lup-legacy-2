@@ -2767,7 +2767,7 @@ class Delivery(MutableModel, Post, arbitrary_types_allowed=True):
             self.concerns().landed(item, thread)
 
     async def delivered(self, item: Item, *, restarts: bool = True) -> None:
-        """Tell the recipient that `item` reached their inbox: the operator through a desktop notice, a conversation through their held calls, or by waking them where the item isn't quiet: the operator's own, or a message another conversation sent them; and where it's the operator's words, a message or an answer, `restarts` saying it isn't lup's word on a decision of theirs, and reaches a session an agent spawned that has ended, restart it (`restarted`)."""
+        """Tell the recipient that `item` reached their inbox: the operator through a desktop notice, a conversation through their held calls, or by waking them where the item isn't quiet: the operator's own, or a message another conversation sent them; and where it's the operator's words, a message, an answer or a review's comments, `restarts` saying it isn't lup's word on a decision of theirs, and reaches a session an agent spawned that has ended, restart it (`restarted`)."""
         match item.recipient:
             case Operator():
                 await self.noticed(item)
@@ -2778,7 +2778,7 @@ class Delivery(MutableModel, Post, arbitrary_types_allowed=True):
                 if (
                     restarts
                     and isinstance(item.sender, Operator)
-                    and isinstance(item.reason, Message | Answer)
+                    and isinstance(item.reason, Message | Answer | Review)
                 ):
                     await self.restarted(item, conversation)
 
@@ -3479,6 +3479,7 @@ class Delivery(MutableModel, Post, arbitrary_types_allowed=True):
             Operator(),
             lander,
             None,
+            restarts=bool(comment.strip()),
         )
 
     async def held_back(self, item: Item, comments: str) -> Item:

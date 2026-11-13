@@ -163,7 +163,7 @@ def repositories(neighbours: list[RelatedRepository]) -> str:
     <BLANKLINE>
     - `atlas`, a made-up neighbour. At `/src/atlas.git`, mounted. On GitHub as `someone/atlas`.
     - `beacon`, another made-up neighbour. At `/src/beacon.git`, missing: it isn't on this machine, so it isn't mounted.
-    - `cairn`, a third. At `/src/cairn.git`, mounted. You may start an agent there with `spawn`, and file a concern into its `No agent` with `concern`, each given `repository="cairn"`.
+    - `cairn`, a third. At `/src/cairn.git`, mounted. You may file a concern into its `No agent` with `concern`, given `repository="cairn"`.
     """
 
     def entry(each: RelatedRepository) -> str:
@@ -174,8 +174,8 @@ def repositories(neighbours: list[RelatedRepository]) -> str:
         )
         github = [] if each.github is None else [f"On GitHub as `{each.github}`."]
         spawning = (
-            "You may start an agent there with `spawn`, and file a concern into "
-            f'its `No agent` with `concern`, each given `repository="{each.name}"`.'
+            "You may file a concern into its `No agent` with `concern`, given "
+            f'`repository="{each.name}"`.'
         )
         spawn = [spawning] if each.spawn else []
         said = [f"- `{each.name}`, {each.about}.", f"At `{each.path}`, {state}."]

@@ -144,10 +144,9 @@ class Spawn(Model):
         default=None,
         description=(
             "Another repository to start it in, by the name your guidance lists "
-            "it under, where it says you may spawn there: its worktree is made "
-            "there, `start` is a branch of that repository, a `concern` one of "
-            "its own, a new title opening at its top, and it runs as that "
-            "repository's sessions do. Left out, this repository."
+            "it under: refused yet, since no room of yours can make its worktree "
+            "there; `concern` with `repository` files what you'd have done there. "
+            "Left out, this repository."
         ),
     )
 
@@ -173,9 +172,13 @@ class SpawnedSession(Model):
     commit: str
     """The commit its worktree was made at, where its branch started."""
     stays: str | None = None
-    """Why a side job's worktree stayed once its spawner's launch was gone,
-    which the operator was told once (`SpawnTools.tidied`); none where it
-    went, or nothing was looked at yet."""
+    """What a side job's worktree held, which stays once its spawner's launch
+    is gone, as the operator was told once (`SpawnTools.left`); none before
+    they were."""
+    launches: list[str] = []
+    """Each launch the host started for the session, its spawn's and each
+    relaunch's, by id: the operator's words restart it only where its last
+    words were heard in one of them (`SpawnTools.restarted`)."""
 
 
 class SpawnCall(Model, arbitrary_types_allowed=True):
@@ -489,7 +492,11 @@ class SpawnTools(MutableModel, RoomTools, arbitrary_types_allowed=True):
             raise SpawnError(message) from unsent
         write_model(
             self.layout.spawned_session(session),
-            SpawnedSession(spec=spawned_as(starting.launch), commit=made.commit),
+            SpawnedSession(
+                spec=spawned_as(starting.launch),
+                commit=made.commit,
+                launches=[starting.launch],
+            ),
         )
         return said(made, start, sent.number, starting.log, handed)
 
@@ -552,25 +559,49 @@ class SpawnTools(MutableModel, RoomTools, arbitrary_types_allowed=True):
         spawned with; marked restarted (`Spawner.restarted`), so a side job
         runs to its next report though its spawner's launch has ended.
         """
-        spec = self.kept(ended)
-        if spec is None or spec.spawner is None:
+        record = self.record(ended)
+        spawner = None if record is None else record.spec.spawner
+        if record is None or spawner is None:
             return None
-        spawner = spec.spawner.model_copy(update={"restarted": True})
+        spec = record.spec
+        place = self.delivery.inbox.whereabouts.get(ended.key())
+        if place is None or place.launch not in record.launches:
+            # A room of a terminal launch can name an ended session's id: the
+            # words the operator answered may be that room's, not its.
+            return (
+                "its last words were heard in a launch lup didn't start for it, so "
+                "they may be another session's, speaking as it"
+            )
         try:
-            await self.relaunched(spec, ended, spawner, spec.arguments, None)
+            await self.relaunched(
+                spec,
+                ended,
+                spawner.model_copy(update={"restarted": True}),
+                spec.arguments,
+                None,
+            )
         except SpawnError as refused:
             return str(refused)
         return None
 
     def kept(self, ended: Conversation) -> HeldLaunch | None:
-        """Return what `ended`, a session's own conversation, was started with where an agent spawned it, as the host kept it (`Layout.spawned_session`), by the session's id lup minted, so nothing a room says names its worktree; none for a subagent, or where nothing's kept or it doesn't read."""
+        """Return what `ended`, a session's own conversation, was started with where an agent spawned it (`record`)."""
+        record = self.record(ended)
+        return None if record is None else record.spec
+
+    def record(self, ended: Conversation) -> SpawnedSession | None:
+        """Return what the host keeps of `ended`, a session's own conversation, where an agent spawned it (`Layout.spawned_session`), by the session's id lup minted, so nothing a room says names its worktree: of its repository and runtime alone, so a room naming that id from another repository reaches none of it. None for a subagent, or where nothing's kept or it doesn't read."""
         if ended.agent is not None:
             return None
         try:
             kept = self.layout.spawned_session(segment(ended.session))
-            return SpawnedSession.model_validate_json(kept.read_text()).spec
+            record = SpawnedSession.model_validate_json(kept.read_text())
         except ValueError, OSError:
             return None
+        spec = record.spec
+        if (spec.repository, spec.runtime) != (ended.repository, ended.runtime):
+            return None
+        return record
 
     async def relaunched(
         self,
@@ -617,7 +648,7 @@ class SpawnTools(MutableModel, RoomTools, arbitrary_types_allowed=True):
         try:
             if not spec.worktree.is_dir(follow_symlinks=False):
                 await self.remade(repository, spec.worktree, asking)
-            return await self.spawning.started(
+            starting = await self.spawning.started(
                 lambda minted: spec.model_copy(
                     update={
                         "launch": minted,
@@ -635,6 +666,15 @@ class SpawnTools(MutableModel, RoomTools, arbitrary_types_allowed=True):
             self.reserved = [
                 each for each in self.reserved if each.token != reserved.token
             ]
+        record = self.record(ended)
+        if record is not None:
+            write_model(
+                self.layout.spawned_session(segment(session)),
+                record.model_copy(
+                    update={"launches": [*record.launches, starting.launch]}
+                ),
+            )
+        return starting
 
     async def left(self) -> None:
         """Tell the operator once of each side job's worktree left once the launch that spawned it is gone, nothing running it: whether its branch holds anything beyond where it started or what's on the integration branch or the running one, as git pinned to the repository reads their refs, in its own threads. lup removes none (`SpawnedSession.stays`). The sweep runs it, apart (`Sweeping.left`).
@@ -678,9 +718,10 @@ class SpawnTools(MutableModel, RoomTools, arbitrary_types_allowed=True):
                 continue
             branches = approved_branches(self.layout, spec.repository)
             stays = (
-                f"nothing on its branch `{spec.worktree.name}` is lost removing it, "
-                f"what it holds being on `{branches.integration}` or "
-                f"`{branches.running}`"
+                f"its branch `{spec.worktree.name}` holds no commit beyond where it "
+                f"started or what's on `{branches.integration}` or "
+                f"`{branches.running}`, or is gone; what's uncommitted in it, lup "
+                "doesn't look at"
                 if unmerged is None
                 else unmerged
             )
@@ -789,13 +830,8 @@ class SpawnTools(MutableModel, RoomTools, arbitrary_types_allowed=True):
             start = self.starting(repository)
             commit = await started_at(git, start, self.reading)
             adding = ["-b", branch, str(root), commit]
-        pruned = await self.git_in(launch, repository, ["worktree", "prune"])
-        ran = (
-            pruned
-            if pruned.status != 0
-            else await self.git_in(
-                launch, repository, ["worktree", "add", "--quiet", *adding]
-            )
+        ran = await self.git_in(
+            launch, repository, ["worktree", "add", "--quiet", *adding]
         )
         if ran.status != 0:
             said = ran.said() or f"it ended with status {ran.status}"
