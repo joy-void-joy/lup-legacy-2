@@ -904,7 +904,7 @@ class SpawnTools(MutableModel, RoomTools, arbitrary_types_allowed=True):
         return reserved
 
     def claimed(self, reserved: Reserved, wanted: str, taken: list[str]) -> str:
-        """Take for `reserved` the first of `wanted`, `wanted-2`, `wanted-3` up to `numbers` that's no branch `taken` names, no path in the repository's `tree/`, and no other spawn's under way; refuse where none is.
+        """Take for `reserved` the first of `wanted`, `wanted-2`, `wanted-3` up to `numbers` that's no branch `taken` names, no path in the repository's `tree/`, no other spawn's under way, and no worktree a session spawned before worked in, which the host keeps for good (`Layout.spawned_session`), so a restart of that one never starts in another's; refuse where none is.
 
         Read and taken at once, with nothing awaited between.
         """
@@ -913,6 +913,7 @@ class SpawnTools(MutableModel, RoomTools, arbitrary_types_allowed=True):
             for each in self.reserved
             if each.repository == reserved.repository and each.token != reserved.token
         ]
+        before = [each.spec.worktree for each in self.recorded()]
         candidates = [wanted, *(f"{wanted}-{n}" for n in range(2, self.numbers + 1))]
         free = next(
             (
@@ -920,6 +921,7 @@ class SpawnTools(MutableModel, RoomTools, arbitrary_types_allowed=True):
                 for each in candidates
                 if each not in taken
                 and each not in others
+                and made_root(reserved.repository, each) not in before
                 and not made_root(reserved.repository, each).exists(
                     follow_symlinks=False
                 )

@@ -16277,6 +16277,32 @@ def test_a_spawner_s_send_makes_its_ended_builder_s_worktree_gone_again_in_its_o
     assert restarted.worktree == spec.worktree
 
 
+def test_a_spawn_never_takes_the_worktree_path_a_session_spawned_before_worked_in(
+    machine: Layout, clock: FakeClock, notices: Raised, said: list[str], tmp_path: Path
+) -> None:
+    """Its worktree gone, landed and cleaned up, the path is free on disk, but a restart of the one before would start in the new one's: the next number is taken."""
+    worktree = tmp_path / "w"
+    spawnable(worktree)
+    repository = worktree / ".git"
+    spawned = SpawnsMade()
+    with inboxed(
+        machine,
+        clock,
+        notices,
+        said,
+        holding=True,
+        spawning=lambda delivery, launchers: spawned.tools(
+            delivery, machine, launchers
+        ),
+    ) as delivery:
+        launched(machine, clock, worktree, "one", "claude")
+        mcp = machine.host.launch("one").mcp
+        send(machine.host.launch("one").hook, claude("SessionStart", source="startup"))
+        builder_ended(machine, clock, delivery, spawned, repository, kept=False)
+        answer, _ = call(mcp, "spawn", {"name": "x", "brief": "Again."})
+    assert answer.startswith("`x-2` is starting"), answer
+
+
 def test_the_operator_s_reply_to_an_ended_builder_it_can_t_restart_is_said_to_them(
     machine: Layout, clock: FakeClock, notices: Raised, said: list[str], tmp_path: Path
 ) -> None:
