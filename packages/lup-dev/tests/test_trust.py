@@ -28,6 +28,7 @@ from lup.types import Model
 from lup_dev import cli
 from lup_dev.approval import (
     Approval,
+    GitTool,
     ReleaseTool,
     Spawnable,
     Tool,
@@ -256,6 +257,68 @@ RELEASE = {
 
 PYPI = "https://pypi.org/simple"
 
+UPSTREAM = "https://github.com/o/lup"
+"""The repository a project's lock pins `lup-dev` from, by git."""
+
+PINNED = "1" * 40
+"""The commit of `UPSTREAM` a project's lock pins first."""
+
+GIT_LOCK = """\
+version = 1
+revision = 5
+requires-python = ">=3.14"
+
+[[package]]
+name = "harmon"
+version = "0.1.0"
+source = {{ virtual = "." }}
+
+[package.dev-dependencies]
+dev = [
+    {{ name = "lup-dev" }},
+]
+
+[[package]]
+name = "lup"
+version = "0.1.0"
+source = {{ git = "https://github.com/o/lup?subdirectory=packages%2Flup&rev=dev#{commit}" }}
+dependencies = [
+    {{ name = "pydantic" }},
+]
+
+[[package]]
+name = "lup-dev"
+version = "0.1.0"
+source = {{ git = "https://github.com/o/lup?subdirectory=packages%2Flup-dev&rev=dev#{commit}" }}
+dependencies = [
+    {{ name = "lup" }},
+    {{ name = "ruff" }},
+]
+
+[[package]]
+name = "pydantic"
+version = "2.12.0"
+source = {{ registry = "https://pypi.org/simple" }}
+
+[[package]]
+name = "rich"
+version = "14.0.0"
+source = {{ registry = "https://pypi.org/simple" }}
+
+[[package]]
+name = "ruff"
+version = "0.16.10"
+source = {{ registry = "https://pypi.org/simple" }}
+"""
+"""A project's lock pinning `lup-dev` from git at `{commit}`, as uv locks a workspace package of another repository."""
+
+FROM_GIT = {
+    "pyproject.toml": "[project]\nname = 'harmon'\nversion = '0.1.0'\n",
+    "uv.lock": GIT_LOCK.format(commit=PINNED),
+    "README.md": "# Harmon\n",
+}
+"""A project with no declaration of its own, pinning `lup-dev` from git."""
+
 
 @pytest.fixture(autouse=True)
 def uvs_own_tools(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -289,6 +352,11 @@ def lup(tmp_path: Path, shell: Shell) -> Path:
 @pytest.fixture
 def audiobook(tmp_path: Path, shell: Shell) -> Path:
     return repository(tmp_path / "audiobook", RELEASE, shell)
+
+
+@pytest.fixture
+def harmon(tmp_path: Path, shell: Shell) -> Path:
+    return repository(tmp_path / "harmon", FROM_GIT, shell)
 
 
 PATIENCE = 60
@@ -678,6 +746,40 @@ def test_a_projects_release_is_its_own_copy_alone_and_restarts_nothing(
         f"Approved: `lup-dev` from {head} judges this repository's sessions, from "
         "their next hook."
     )
+
+
+def test_a_project_pinning_lup_dev_from_git_is_judged_by_that_commit_alone(
+    harmon: Path, kit: Kit
+) -> None:
+    """A project whose lock pins `lup-dev` from git is judged by a copy of that commit, its own: the person's command and the host service never run it."""
+    trust = trusting(harmon, kit, yes())
+    outcome = trust.ensure()
+    assert isinstance(outcome, Trusted)
+    [install] = recording(trust).installed
+    assert isinstance(install.tool, GitTool)
+    assert install.tool.commit == PINNED
+    assert not install.users
+    assert switched_to(trust) == []
+    assert not outcome.restarted
+    assert f"`lup-dev` from {UPSTREAM} at {PINNED}, needing:" in summarised(trust)
+
+
+def test_moving_the_commit_a_project_pins_asks_again_and_says_both(
+    harmon: Path, kit: Kit, shell: Shell
+) -> None:
+    """Moving the commit a project's lock pins is a change to what judges it: the operator approves it, told which commit becomes which."""
+    trusting(harmon, kit, yes()).ensure()
+    moved = "2" * 40
+    changed(harmon, {"uv.lock": GIT_LOCK.format(commit=moved)}, shell)
+    trust = trusting(harmon, kit, yes())
+    trust.ensure()
+    said = (
+        f"`lup-dev` from {UPSTREAM} at {PINNED} becomes {moved}, needing what it did."
+    )
+    assert said in summarised(trust)
+    [install] = recording(trust).installed
+    assert isinstance(install.tool, GitTool)
+    assert install.tool.commit == moved
 
 
 def test_two_repositories_keep_their_own_copies(
@@ -1877,17 +1979,35 @@ def test_an_approved_commit_gone_from_the_repository_shows_everything(
 def test_a_lock_that_doesnt_pin_lup_dev_or_pins_it_from_elsewhere_refuses() -> None:
     with pytest.raises(TrustError, match="doesn't pin `lup-dev`"):
         Lock.parse("version = 1\n").tool("lup-dev")
-    git = (
+    url = (
         "[[package]]\n"
         'name = "lup-dev"\n'
         'version = "0.4.0"\n'
-        'source = { git = "https://github.com/joy-void-joy/lup?branch=dev#abc" }\n'
+        'source = { url = "https://example.com/lup_dev-0.4.0-py3-none-any.whl" }\n'
     )
     with pytest.raises(
-        TrustError,
-        match=r"resolves `lup-dev` from git https://github\.com/joy-void-joy/lup",
+        TrustError, match=r"resolves `lup-dev` from url https://example\.com/"
     ):
-        Lock.parse(git).tool("lup-dev")
+        Lock.parse(url).tool("lup-dev")
+    unresolved = (
+        "[[package]]\n"
+        'name = "lup-dev"\n'
+        'version = "0.4.0"\n'
+        'source = { git = "https://github.com/joy-void-joy/lup?branch=dev" }\n'
+    )
+    with pytest.raises(TrustError, match="naming no commit"):
+        Lock.parse(unresolved).tool("lup-dev")
+
+
+def test_a_lock_pinning_lup_dev_from_git_names_the_commit_it_resolved() -> None:
+    """A lock pinning `lup-dev` from git gives the commit uv resolved, held to what it needs from an index: what the commit holds itself comes with it."""
+    tool = Lock.parse(GIT_LOCK.format(commit=PINNED)).tool("lup-dev")
+    assert isinstance(tool, GitTool)
+    assert tool.repository == UPSTREAM
+    assert tool.commit == PINNED
+    assert tool.package == Path("packages/lup-dev")
+    assert tool.pins["ruff"] == "0.16.10"
+    assert "lup" not in tool.pins
 
 
 RUFF_LOCK = """\
@@ -2207,6 +2327,48 @@ def test_uv_installs_a_release_from_its_index_held_to_its_pins(
     )
     assert install.endswith(f"--default-index {PYPI} lup-dev==0.4.0")
     assert constraints == ["lup==0.4.0", "pydantic==2.12.0"]
+
+
+def test_uv_fetches_builds_and_installs_the_commit_pinned_held_to_its_pins(
+    lup: Path, tmp_path: Path, shell: Shell, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A copy pinned from git is the pinned commit's, built as its own gate builds it, never a later commit of its branch, its dependencies held to the project's pins."""
+    command = [sys.executable, "packages/lup-dev/checker/build.py"]
+    pinned = changed(
+        lup,
+        {
+            "packages/lup-dev/checker/build.py": MARKED,
+            "lup_project.py": BUILDING.format(command=command, inside=True),
+        },
+        shell,
+    )
+    later = {"packages/lup-dev/src/environment/__init__.py": '"""Later."""\n'}
+    changed(lup, later, shell)
+    mark = tmp_path / "mark"
+    monkeypatch.setenv("LUP_MARK", str(mark))
+    fake, log = fake_uv(tmp_path)
+    tool = GitTool(
+        name="lup-dev",
+        repository=f"file://{lup}",
+        commit=pinned,
+        package=Path("packages/lup-dev"),
+        pins={"pydantic": "2.12.0"},
+    )
+    copy = CopyLayout(home=tmp_path / "judges" / "harmon" / "copies" / "a1")
+    host = Host({"node": "26.7.0", "uv": "0.12.5"})
+    UvToolchain(executable=str(fake), tools=host).install(
+        tool, Git(cwd=tmp_path), "unused", copy, users=False
+    )
+    how, _, source = mark.read_text().partition(": ")
+    ran, _, where = how.partition(" in ")
+    assert ran == "marking"
+    assert source == '"""The environment."""\n'
+    install, *constraints = log.read_text().splitlines()
+    assert install.startswith(
+        f"{copy.tools} {copy.bin} tool install --force --constraints "
+    )
+    assert install.endswith(f"{where}/packages/lup-dev")
+    assert constraints == ["pydantic==2.12.0"]
 
 
 def test_uv_names_the_directory_of_the_persons_commands(tmp_path: Path) -> None:
