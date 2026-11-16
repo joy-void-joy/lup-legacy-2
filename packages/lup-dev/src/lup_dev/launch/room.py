@@ -103,6 +103,7 @@ from lup.sessions import bridge
 from lup.sessions.terminal import TerminalSettings
 from lup.types import Model
 from lup_dev import environments
+from lup_dev.approval import GitTool
 from lup_dev.catalog.room import Editor, Editors, RoomBase
 from lup_dev.clipboard import shim
 from lup_dev.declaration.kinds import Package
@@ -122,6 +123,8 @@ from lup_dev.launch.images import definition
 from lup_dev.layout import (
     LOCALTIME,
     CheckoutLayout,
+    CopyLayout,
+    JudgeLayout,
     LaunchLayout,
     LaunchSockets,
     RoomPaths,
@@ -135,6 +138,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
 
     from lup.rooms.engine import Podman
+    from lup_dev.approval import Tool
     from lup_dev.declaration import kinds
     from lup_dev.declaration.requirements import Tools
     from lup_dev.declaration.resolve import Resolved
@@ -802,6 +806,60 @@ class RoomClipboard(Model):
         for path in [self.launch.pasting, self.launch.copying]:
             path.write_text(wanted[path])
             path.chmod(0o755)
+
+
+class RoomCopy(Model):
+    """What a room gets of the copy of `lup-dev` judging its repository, where that copy is pinned from git: the copy, read-only at its host path, and its command among the launch's own, first on the room's `PATH` (`docs/launch.md`, *The copy that judges, in a room*).
+
+    A `lup-dev` installed from git carries no engine, which is built and never
+    committed, so the project's own environment couldn't run the gate's rules,
+    and would bring lup's packages, `lup` among them, into the project's. The
+    copy that judges is built from the same commit, engine included, and the
+    room's gate runs it through `uv run`, which finds it on the room's `PATH`
+    where the project's environment installs none.
+    """
+
+    launch: LaunchLayout
+    judging: CopyLayout
+    """The copy judging as the launch starts: one approved later reaches the
+    room at its next launch."""
+    name: str
+    """Its command, by its package's name: `lup-dev`."""
+
+    @property
+    def mounts(self) -> list[Mount]:
+        """The copy, read-only, at its host path: its environment, whose interpreter links into uv's store, which the room mounts for the project's own."""
+        return [Mount(source=self.judging.home, read_only=True)]
+
+    def write(self) -> None:
+        """Link the command among the launch's own to the copy's."""
+        self.launch.bin.mkdir(parents=True, exist_ok=True)
+        command = self.launch.bin / self.name
+        command.unlink(missing_ok=True)
+        command.symlink_to(self.judging.command(self.name))
+
+
+def room_copy(tool: Tool, judge: JudgeLayout, launch: LaunchLayout) -> RoomCopy | None:
+    """Return what the room gets of the copy judging its repository, `judge`'s, where `tool` is pinned from git; none for any other, whose project's environment holds its own `lup-dev`.
+
+    Raise `RoomError` where no copy judges, which trust on launch installs
+    before a room is made.
+    """
+    match tool:
+        case GitTool():
+            if not judge.bin.is_symlink():
+                message = (
+                    f"no copy of `{tool.name}` judges this repository, at "
+                    f"{judge.bin}: `lup-dev trust` installs the one approved"
+                )
+                raise RoomError(message)
+            return RoomCopy(
+                launch=launch,
+                judging=CopyLayout(home=judge.bin.resolve().parent),
+                name=tool.name,
+            )
+        case _:
+            return None
 
 
 class RoomPackageAge(Model):
