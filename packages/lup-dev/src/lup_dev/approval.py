@@ -140,25 +140,94 @@ class ReleaseTool(Model):
                 kept = False
                 heading = f"`{self.name}` {here}, needing:"
                 earlier = {}
-
-        def moved(name: str) -> str:
-            was = earlier.get(name)
-            pinned = self.pins.get(name)
-            if was is None:
-                return f"  {name} {pinned}, added" if earlier else f"  {name} {pinned}"
-            if pinned is None:
-                return f"  {name} {was}, dropped"
-            return f"  {name} {was} becomes {pinned}"
-
-        names = list(dict.fromkeys([*earlier, *self.pins]))
-        changed = [name for name in names if earlier.get(name) != self.pins.get(name)]
+        changed = moves(earlier, self.pins)
         if kept and not changed:
             return [f"`{self.name}` {here}, as before, needing what it did."]
-        return [heading, *(moved(name) for name in changed)]
+        return [heading, *changed]
 
 
-type Tool = Annotated[WorkspaceTool | ReleaseTool, Field(discriminator="kind")]
-"""The `lup-dev` the host runs for a repository: its workspace's own, or a release."""
+class GitTool(Model):
+    """`lup-dev` at a commit of another repository, as the repository's lock pins it from git.
+
+    The host runs a copy built from that commit's source, as lup's own is built
+    from its workspace, its dependencies held to the pins. So a project is judged
+    by a `lup-dev` no index publishes, at the commit its lock names.
+    """
+
+    kind: Literal["git"] = "git"
+    name: str
+    repository: str
+    """The repository git fetches the commit from, as the lock gives it."""
+    commit: str
+    """The commit the lock resolved, by its full id."""
+    package: Path
+    """Its directory in that repository, which `uv tool install` installs."""
+    pins: dict[str, str]
+    """Every package it needs from an index, by name, at the version the lock
+    pins: the copy's dependencies are held to them."""
+
+    def paths(self) -> list[Path]:
+        """List none: the copy is the other repository's commit, not this one's files."""
+        return []
+
+    def lups_own(self) -> bool:
+        """Say whether the copy is lup's own command too: a project's commit of lup isn't.
+
+        The `lup-dev` a person runs, and the host service runs from, stays the one
+        approved on lup's own repository; this copy judges the project's own
+        launches alone.
+        """
+        return False
+
+    def constraints(self) -> str:
+        """Return the pins as a requirements file, which uv takes as constraints."""
+        return "".join(f"{name}=={version}\n" for name, version in self.pins.items())
+
+    def said(self, before: Tool | None) -> list[str]:
+        """Say how the commit, and the versions it's held to, changed."""
+        here = f"{self.repository} at {self.commit}"
+        match before:
+            case GitTool() if before.repository == self.repository:
+                said = (
+                    f"`{self.name}` from {here}, as before"
+                    if before.commit == self.commit
+                    else (
+                        f"`{self.name}` from {self.repository} at {before.commit} "
+                        f"becomes {self.commit}"
+                    )
+                )
+                changed = moves(before.pins, self.pins)
+                if not changed:
+                    return [f"{said}, needing what it did."]
+                return [f"{said}:", *changed]
+            case _:
+                return [f"`{self.name}` from {here}, needing:", *moves({}, self.pins)]
+
+
+def moves(earlier: dict[str, str], pins: dict[str, str]) -> list[str]:
+    """Say each package whose pin moved since `earlier`, a line each: added, dropped, or from one version to another; each one, where `earlier` pins none.
+
+    >>> moves({"lup": "0.4.0", "rich": "14.0.0"}, {"lup": "0.5.0", "ruff": "0.16.10"})
+    ['  lup 0.4.0 becomes 0.5.0', '  rich 14.0.0, dropped', '  ruff 0.16.10, added']
+    """
+
+    def moved(name: str) -> str:
+        was = earlier.get(name)
+        pinned = pins.get(name)
+        if was is None:
+            return f"  {name} {pinned}, added" if earlier else f"  {name} {pinned}"
+        if pinned is None:
+            return f"  {name} {was}, dropped"
+        return f"  {name} {was} becomes {pinned}"
+
+    names = list(dict.fromkeys([*earlier, *pins]))
+    return [moved(name) for name in names if earlier.get(name) != pins.get(name)]
+
+
+type Tool = Annotated[
+    WorkspaceTool | ReleaseTool | GitTool, Field(discriminator="kind")
+]
+"""The `lup-dev` the host runs for a repository: its workspace's own, a release, or a commit from git."""
 
 
 class Approval(Model):
