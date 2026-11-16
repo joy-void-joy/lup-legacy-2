@@ -29,6 +29,7 @@ from lup_dev import (
     Repository,
     environments,
 )
+from lup_dev.approval import GitTool, ReleaseTool, WorkspaceTool
 from lup_dev.catalog.room import Editors, RoomBase
 from lup_dev.declaration.package_managers.manager import (
     HomeSettings,
@@ -49,10 +50,18 @@ from lup_dev.launch.room import (
     maintaining_room,
     related,
     repository,
+    room_copy,
     unclaimed,
     vacated,
 )
-from lup_dev.layout import LOCALTIME, LaunchLayout, Layout, PyrightLayout, RoomPaths
+from lup_dev.layout import (
+    LOCALTIME,
+    JudgeLayout,
+    LaunchLayout,
+    Layout,
+    PyrightLayout,
+    RoomPaths,
+)
 from lup_dev.pyright_source import Fetching, Sources
 from lup_dev.settings import LupDevSettings, TerminalVariables
 
@@ -1143,3 +1152,70 @@ def test_a_package_manager_getting_none_says_why_and_mounts_nothing(
     assert gate.settings == []
     assert gate.ungated == [why]
     assert gate.mounts == []
+
+
+# The copy that judges, in a room
+
+
+PINNED_FROM_GIT = GitTool(
+    name="lup-dev",
+    repository="https://github.com/o/lup",
+    commit="1" * 40,
+    package=Path("packages/lup-dev"),
+    pins={"ruff": "0.16.10"},
+)
+"""A `lup-dev` a project's lock pins from git."""
+
+
+def judged(home: Path, copy: str) -> JudgeLayout:
+    """A repository's copies, the one named `copy` judging, its command saying its name."""
+    judge = JudgeLayout(home=home)
+    judging = judge.named(copy)
+    judging.bin.mkdir(parents=True)
+    command = judging.command("lup-dev")
+    command.write_text(f"#!/bin/sh\necho {copy}\n")
+    command.chmod(0o755)
+    judge.bin.symlink_to(judging.bin.relative_to(judge.home))
+    return judge
+
+
+def test_a_room_of_a_project_pinned_from_git_runs_the_copy_that_judges(
+    tmp_path: Path,
+) -> None:
+    """A room of a project whose `lup-dev` is pinned from git runs, as `lup-dev`, the copy judging its repository, which it reads and can't write."""
+    judge = judged(tmp_path / "judges" / "harmon", "a1")
+    launch = LaunchLayout(directory=tmp_path / "launch")
+    copied = room_copy(PINNED_FROM_GIT, judge, launch)
+    assert copied is not None
+    copied.write()
+    assert run(str(launch.bin / "lup-dev")).text() == "a1"
+    assert judge.named("a1").home in [each.source for each in copied.mounts]
+    assert all(each.read_only for each in copied.mounts)
+
+
+def test_a_room_of_a_project_judged_by_a_release_or_its_own_source_gets_no_copy(
+    tmp_path: Path,
+) -> None:
+    """A project whose `lup-dev` is a release, or its own workspace's, runs the one its own environment holds: its room gets no copy."""
+    judge = judged(tmp_path / "judges" / "lup", "a1")
+    launch = LaunchLayout(directory=tmp_path / "launch")
+    release = ReleaseTool(
+        name="lup-dev", version="0.4.0", registry="https://pypi.org/simple", pins={}
+    )
+    own = WorkspaceTool(
+        name="lup-dev",
+        package=Path("packages/lup-dev"),
+        members=[Path("packages/lup-dev")],
+    )
+    assert room_copy(release, judge, launch) is None
+    assert room_copy(own, judge, launch) is None
+
+
+def test_a_room_of_a_project_pinned_from_git_with_no_copy_judging_refuses(
+    tmp_path: Path,
+) -> None:
+    """A project pinned from git with no copy judging it gets no room, rather than one whose gate has no `lup-dev` to run."""
+    judge = JudgeLayout(home=tmp_path / "judges" / "harmon")
+    launch = LaunchLayout(directory=tmp_path / "launch")
+    with pytest.raises(RoomError, match="lup-dev trust"):
+        room_copy(PINNED_FROM_GIT, judge, launch)

@@ -14,8 +14,10 @@ layer beside it:
 - the `lup-dev` the host runs (`Tool`): where the repository's lock resolves it
   from the repository's own workspace, as lup's does, that source
   (`WorkspaceTool`: uv's files, the project file and modules of each workspace
-  package `lup-dev` needs, and the engine's source); otherwise the release the lock
-  pins, with every package it needs at its locked version (`ReleaseTool`);
+  package `lup-dev` needs, and the engine's source); where it resolves it from git,
+  the commit it pins of that repository, with every package it needs from an
+  index at its locked version (`GitTool`); otherwise the release the lock pins,
+  with every package it needs at its locked version (`ReleaseTool`);
 - the person's own layer of the declaration, `lup_project.local.py` in the
   repository's main worktree (`person_layer`), which git ignores, so it's in the zone by its
   content (`Zone.local`), and what it imports of the commit with the rest
@@ -102,6 +104,7 @@ from importlib.machinery import SOURCE_SUFFIXES, FileFinder, SourceFileLoader
 from importlib.util import resolve_name
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, override
+from urllib.parse import parse_qs, urlsplit, urlunsplit
 
 import typer
 from filelock import FileLock
@@ -113,6 +116,7 @@ from lup.programs import run
 from lup.types import Model, MutableModel
 from lup_dev.approval import (
     Approval,
+    GitTool,
     ReleaseTool,
     Tool,
     WorkspaceTool,
@@ -321,8 +325,10 @@ class Lock(Model):
         Where it's a member of the lock's workspace, the workspace's own source,
         with each of the members `beside` names that the workspace has, installed
         beside it in the person's own copy; where it comes from an index, that
-        release. Raise `TrustError` where the lock doesn't pin it, pins it twice,
-        or resolves it from anywhere else.
+        release; where it comes from git, the commit the lock resolved, which is
+        what a git source's fragment holds as uv locks it. Raise `TrustError`
+        where the lock doesn't pin it, pins it twice, or resolves it from
+        anywhere else.
         """
         pinned = [package for package in self.package if package.name == name]
         if not pinned:
@@ -358,6 +364,8 @@ class Lock(Model):
                 members=[each for each in members if each is not None],
                 beside=[each for each in besides if each is not None],
             )
+        if package.source.git is not None:
+            return pinned_from_git(package.source.git, name, needed)
         if package.source.registry is not None and package.version is not None:
             return ReleaseTool(
                 name=name,
@@ -367,10 +375,49 @@ class Lock(Model):
             )
         message = (
             f"`uv.lock` resolves `{name}` from {package.source.said()}: the host runs "
-            "a release from an index, or the repository's own workspace source, and "
-            "lup approves no other"
+            "a release from an index, a commit from git, or the repository's own "
+            "workspace source, and lup approves no other"
         )
         raise TrustError(message)
+
+
+class GitQuery(Model):
+    """The query of a git source's URL, as uv locks it: the part trust reads."""
+
+    subdirectory: list[str] = ["."]
+    """The package's directory in the repository, named once; the root where
+    it's none."""
+
+
+def pinned_from_git(source: str, name: str, needed: list[LockedPackage]) -> GitTool:
+    """Return the package `name` at the commit a git source of `uv.lock` resolved, held to what `needed` pins from an index.
+
+    uv locks a git source as the repository's URL, the package's directory in its
+    query's `subdirectory` and the commit it resolved as its fragment. Raise
+    `TrustError` where the fragment names no commit, since then which the host
+    runs isn't pinned.
+
+    >>> pinned_from_git(
+    ...     "https://github.com/o/lup?subdirectory=packages%2Flup-dev&rev=dev#0a1b", "lup-dev", []
+    ... ).model_dump(exclude={"pins"})
+    {'kind': 'git', 'name': 'lup-dev', 'repository': 'https://github.com/o/lup', 'commit': '0a1b', 'package': PosixPath('packages/lup-dev')}
+    """
+    at = urlsplit(source)
+    if not at.fragment:
+        message = (
+            f"`uv.lock` resolves `{name}` from git {source}, naming no commit, so "
+            "which the host runs isn't pinned"
+        )
+        raise TrustError(message)
+    [package] = GitQuery.model_validate(parse_qs(at.query)).subdirectory
+    indexed = [each for each in needed if each.source.registry is not None]
+    return GitTool(
+        name=name,
+        repository=urlunsplit((at.scheme, at.netloc, at.path, "", "")),
+        commit=at.fragment,
+        package=Path(package),
+        pins=pinned_versions(indexed, name),
+    )
 
 
 def pinned_versions(packages: list[LockedPackage], name: str) -> dict[str, str]:
@@ -1138,6 +1185,8 @@ class UvToolchain(Model, Toolchain, arbitrary_types_allowed=True):
                     self.built(tool, tree, copy, users=users)
             case ReleaseTool():
                 self.released(tool, copy)
+            case GitTool():
+                self.fetched(tool, copy)
 
     def uv(self, place: CopyLayout) -> list[str]:
         """Return the command running uv's tools in the repository's copy `place`."""
@@ -1210,6 +1259,38 @@ class UvToolchain(Model, Toolchain, arbitrary_types_allowed=True):
                 "--constraints",
                 str(constraints),
                 *(part for each in withs for part in ["--with", str(tree / each)]),
+                str(tree / tool.package),
+                cwd=tree,
+                shown=True,
+            )
+
+    def fetched(self, tool: GitTool, place: CopyLayout) -> None:
+        """Install the commit `tool` pins from its repository in `place`, built as its gate builds it, its dependencies held to the pins.
+
+        The commit alone is fetched into a scratch repository, which git checks
+        by its id, and exported from git's objects as a workspace's source is,
+        so what installs is that commit's whatever the repository's branches do
+        since.
+        """
+        with tempfile.TemporaryDirectory() as scratch:
+            store = Path(scratch) / "store"
+            tree = Path(scratch) / "tree"
+            constraints = Path(scratch) / "constraints.txt"
+            Git(cwd=Path(scratch)).run("init", "--quiet", "--bare", str(store))
+            git = Git.pinned(store)
+            git.run("fetch", "--quiet", "--depth=1", tool.repository, tool.commit)
+            git.export(tool.commit, tree)
+            self.build(tree)
+            constraints.write_text(tool.constraints())
+            program, *arguments = self.uv(place)
+            run(
+                program,
+                *arguments,
+                "tool",
+                "install",
+                "--force",
+                "--constraints",
+                str(constraints),
                 str(tree / tool.package),
                 cwd=tree,
                 shown=True,
