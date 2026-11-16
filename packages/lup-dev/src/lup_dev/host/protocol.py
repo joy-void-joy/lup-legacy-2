@@ -389,6 +389,15 @@ class Register(Request, reads=False):
     approved: the copy approved it runs, which its session is told as it
     starts, so an agent needing the newer can ask the operator for it. None
     where it runs the tip's."""
+    profile: str | None = None
+    """The profile it runs on, by name, as its launcher chose it: a session it
+    forks through lup's `spawn` runs on it too, so both keep their records in
+    one history (`SpawnTools.forked`). None in a record from before launches
+    kept it."""
+    account: str | None = None
+    """The account its runtime logs in with, as its launcher chose it, which a
+    session it forks logs in with too. None in a record from before launches
+    kept it."""
 
 
 class Rename(Request, reads=False):

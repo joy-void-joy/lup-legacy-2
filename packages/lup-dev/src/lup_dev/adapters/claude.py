@@ -665,6 +665,7 @@ class SessionStart(Payload):
             fits=fits,
             title=self.session_title,
             fresh=self.source in get_args(FreshStart.__value__) and not self.agent_id,
+            forked=self.source == "fork" and not self.agent_id,
             anew=self.source in get_args(NewProcess.__value__) and not self.agent_id,
             takes_title=self.source in get_args(TitledStart.__value__)
             and not self.agent_id,
@@ -1679,6 +1680,31 @@ def resuming(session: str) -> list[str]:
     ValueError: badly formed hexadecimal UUID string
     """
     return ["--resume", str(UUID(session))]
+
+
+def forking(forked: str, session: str) -> list[str]:
+    """Return the arguments starting Claude Code's new session `session` as a fork of `forked`: all `forked` said, under the id given, which `--session-id` gives a fork as it gives a new session (`docs/field-notes.md`, *A fork of a session*); refusing an id that isn't a UUID.
+
+    >>> forking("0f6b1d2e-6a62-4a39-9a8c-1f2d3e4f5a6b", "8f2c1d2e-6a62-4a39-9a8c-1f2d3e4f5a6b")
+    ['--resume', '0f6b1d2e-6a62-4a39-9a8c-1f2d3e4f5a6b', '--fork-session', '--session-id', '8f2c1d2e-6a62-4a39-9a8c-1f2d3e4f5a6b']
+    """
+    return [*resuming(forked), "--fork-session", *fresh(session)]
+
+
+def resumable(
+    home: Path, directory: Path, session: str, longest: int = 200
+) -> Path | None:
+    """Return where Claude Code run in `directory` finds the session `session` to resume or fork: its record in the folder of `directory`'s sessions, in the history `home` holds, as it finds one by its id there alone; none where that folder's name is past what Claude Code writes whole, `longest` UTF-16 units (`filed`), its hash unknown to lup. Refuse an id that isn't a UUID.
+
+    >>> resumable(Path("/h"), Path("/w/lup.git/tree/x"), "0f6b1d2e-6a62-4a39-9a8c-1f2d3e4f5a6b")
+    PosixPath('/h/projects/-w-lup-git-tree-x/0f6b1d2e-6a62-4a39-9a8c-1f2d3e4f5a6b.jsonl')
+    >>> resumable(Path("/h"), Path("/" + "x" * 300), "0f6b1d2e-6a62-4a39-9a8c-1f2d3e4f5a6b") is None
+    True
+    """
+    folder = folder_named(directory)
+    if len(folder) > longest:
+        return None
+    return home / "projects" / folder / f"{normal(session)}.jsonl"
 
 
 def normal(session: str) -> str:
@@ -3529,6 +3555,8 @@ def adapter() -> Adapter:
             normal=normal,
             fresh=fresh,
             resuming=resuming,
+            forking=forking,
+            resumable=resumable,
             session=held_session,
             prompt=held_prompt,
         ),

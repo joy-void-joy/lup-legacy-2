@@ -66,6 +66,11 @@ class HeldLaunch(Model):
     """The runtime's id for the session it starts, minted by the host where an
     agent spawned it, so its brief is addressed to it before it's up; none has
     the launcher mint one, or resume `resume`."""
+    forks: str | None = None
+    """The runtime's id for the session whose conversation it starts from, as
+    a fork: a new session, `session`, holding all that one said, where an agent
+    spawned it from their conversation (`SpawnTools.forked`). None starts one
+    afresh, or resumes `resume`."""
     repository: AbsolutePath | None = None
     """The repository's git directory as the host recorded the spawner's
     launch, where an agent spawned it: the launcher refuses a worktree whose

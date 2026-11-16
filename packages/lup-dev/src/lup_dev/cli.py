@@ -45,7 +45,7 @@ from lup_dev import commanding, conversions
 from lup_dev.accounts import AccountError, Accounts, Login, RuntimeLogin
 
 # lup: ignore("runtime-mention", why="the one place listing the adapters")
-from lup_dev.adapters import Adapter, claude, codex
+from lup_dev.adapters import Adapter, Holding, claude, codex
 from lup_dev.approval import approved, approved_branches
 from lup_dev.clipboard.desktop import Desktop
 from lup_dev.clipboard.protocol import routes as clipboard_routes
@@ -283,7 +283,7 @@ from lup_dev.launch.session import (
     hooked,
     terminal_settings,
 )
-from lup_dev.launch.spawning import Respawns, SpawnTools
+from lup_dev.launch.spawning import Forking, Respawns, SpawnTools
 from lup_dev.launch.trial import TerminalRun, Trial, scratched, taken_over_there
 from lup_dev.launch.trust import (
     Approving,
@@ -1079,10 +1079,10 @@ def room_tools(
 def spawn_tools(
     delivery: Delivery, layout: Layout, launchers: Launchers, known: Adapters
 ) -> SpawnTools:
-    """Return the `spawn` tool as the service serves it: launchers started as `lup-dev spawn`'s are, among `launchers`; the launches served read from their records; a session's id minted by its runtime's adapter, where it has a held session; and a worktree started from the integration branch the declaration approved for its repository names."""
+    """Return the `spawn` tool as the service serves it: launchers started as `lup-dev spawn`'s are, among `launchers`; the launches served read from their records; a session's id minted, and a session forked, by its runtime's adapter, where it has a held session; and a worktree started from the integration branch the declaration approved for its repository names."""
 
-    def mint(runtime: str) -> str | None:
-        held = next(
+    def holding(runtime: str) -> Holding | None:
+        return next(
             (
                 each.holding
                 for each in known.known
@@ -1090,7 +1090,16 @@ def spawn_tools(
             ),
             None,
         )
+
+    def mint(runtime: str) -> str | None:
+        held = holding(runtime)
         return None if held is None else held.minted()
+
+    def forking(runtime: str) -> Forking | None:
+        held = holding(runtime)
+        if held is None or held.forking is None:
+            return None
+        return Forking(resumable=held.resumable)
 
     return SpawnTools(
         delivery=delivery,
@@ -1099,6 +1108,7 @@ def spawn_tools(
         launchers=launchers,
         served=lambda: recorded_launches(layout.host),
         mint=mint,
+        forking=forking,
         starting=lambda repository: approved_branches(layout, repository).integration,
     )
 
@@ -2812,6 +2822,8 @@ def launched(
             model=model_named([*arguments, *([] if held is None else held.arguments)]),
             session=None if held is None else naming.session,
             behind=behind(trusting),
+            profile=choice.profile.name,
+            account=choice.account,
         )
         session, arguments = naming.session, naming.arguments
         hiding = RoomSecrets.of(
@@ -3029,26 +3041,42 @@ def still_running(podman: Podman, container: str) -> bool:
 def named_session(
     adapter: Adapter, arguments: list[str], held: HeldLaunch | None
 ) -> NamedSession:
-    """Return the runtime's id for the session a launch runs, where it's known before its room starts, and the runtime's arguments: a held launch's, named up front, new or resumed, before the operator's own; a terminal's, the one its arguments resume by its id, they unchanged.
+    """Return the runtime's id for the session a launch runs, where it's known before its room starts, and the runtime's arguments: a held launch's, named up front, new, resumed or forked from another, before the operator's own; a terminal's, the one its arguments resume by its id, they unchanged.
 
-    Raise `LaunchError` where a held launch resumes an id that can't be one of
-    the runtime's.
+    Raise `LaunchError` where a held launch resumes or forks an id that can't be
+    one of the runtime's, or forks one where the runtime forks none.
     """
     holding = adapter.holding
     if held is None or holding is None:
         return NamedSession(
             session=an_id(adapter, adapter.resumed(arguments)), arguments=arguments
         )
-    fresh = held.session or holding.minted()
+    named = held.resume if held.forks is None else held.forks
     try:
-        session = fresh if held.resume is None else holding.normal(held.resume)
-        naming = (
-            holding.fresh(session) if held.resume is None else holding.resuming(session)
-        )
+        naming = held_named(holding, held, held.session or holding.minted())
     except ValueError as unnamed:
-        message = f"`{held.resume}` can't be a session of {adapter.runtime.name()}'s"
+        message = f"`{named}` can't be a session of {adapter.runtime.name()}'s"
         raise LaunchError(message) from unnamed
-    return NamedSession(session=session, arguments=[*naming, *held.arguments])
+    if naming is None:
+        message = f"{adapter.runtime.name()} forks no session it holds"
+        raise LaunchError(message)
+    return naming.model_copy(update={"arguments": [*naming.arguments, *held.arguments]})
+
+
+def held_named(holding: Holding, held: HeldLaunch, fresh: str) -> NamedSession | None:
+    """Return the session a held launch runs and the runtime's arguments naming it, lup's alone: `fresh` forked from `held.forks`, `held.resume` resumed, or else `fresh` started; none where it forks one and the runtime forks none. Raise `ValueError` for an id that can't be the runtime's."""
+    if held.forks is not None:
+        if holding.forking is None:
+            return None
+        session = holding.normal(fresh)
+        return NamedSession(
+            session=session,
+            arguments=holding.forking(holding.normal(held.forks), session),
+        )
+    if held.resume is not None:
+        session = holding.normal(held.resume)
+        return NamedSession(session=session, arguments=holding.resuming(session))
+    return NamedSession(session=fresh, arguments=holding.fresh(fresh))
 
 
 def an_id(adapter: Adapter, resumed: str | None) -> str | None:

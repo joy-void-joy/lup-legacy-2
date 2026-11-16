@@ -50,7 +50,17 @@ line, a path or git, is held to this:
 - **The runtime** is the spawner's, and only one with a session held with no
   terminal; the call names none, nor any of its arguments, a profile or an
   account: the launch runs on its repository's default profile, as
-  `lup-dev spawn` with none named does.
+  `lup-dev spawn` with none named does, and a fork on the spawner's, as the
+  host recorded it (`Register.profile`), so both keep their records in one
+  history.
+- **A fork's conversation** is the spawner's own, never a subagent's, which no
+  runtime resumes, named by the session the host recorded for the call. Where
+  the runtime finds a session to fork only among the records of the directory
+  it runs in (`Holding.resumable`), the spawner's record is copied there by the
+  spawner's room, through `podman exec`, never by the host: the history is
+  the rooms' to write, and any path in it a link a room can plant toward the
+  host's files (`copied`). The fork's own room removes the copy once its
+  start is heard, its runtime holding the conversation by then (`forked`).
 - **The brief** is text in the inbox alone: an item from the spawner to the
   session spawned, which reaches it as its first turn through its launcher, as
   the operator's words do (`Delivery.called_up`). `concern` is resolved through
@@ -133,6 +143,17 @@ class Spawn(Model):
             "out, it's a side job for you, its report coming back to you."
         ),
     )
+    fork: bool = Field(
+        default=True,
+        description=(
+            "Start it from your conversation so far, forked: it knows all you "
+            "and the operator said up to this call, and your brief is its next "
+            "turn, so it can say just what's theirs. False starts it afresh from "
+            "its brief alone, for work that needs none of it. A subagent's spawn "
+            "starts afresh whatever this says: only a session's own conversation "
+            "is forked."
+        ),
+    )
     start: str | None = Field(
         default=None,
         description=(
@@ -165,6 +186,25 @@ class SpawnError(InboxError):
     """A spawn that can't be made, and why."""
 
 
+class Forking(Model, arbitrary_types_allowed=True):
+    """How a runtime forks a session it holds, as the spawn tool needs it: where the runtime finds the session to fork, which its adapter says (`Holding.resumable`)."""
+
+    resumable: Callable[[Path, Path, str], Path | None] | None = None
+    """Where the runtime run in a directory finds a session to fork: the history
+    its rooms share, the directory and the session's id in, the session's
+    record out; none where it can't be said. None where it finds one by its id
+    alone, wherever it runs."""
+
+
+class Starts(Model):
+    """How a spawned session starts: the session whose conversation it forks, where it forks one, and what its spawner is told of it."""
+
+    forks: str | None = None
+    """The runtime's id for the spawner's session it forks; none starts it
+    afresh from its brief."""
+    said: str
+
+
 class SpawnedSession(Model):
     """What the host keeps of a session an agent spawned, by its session's id (`Layout.spawned_session`): what its launcher was started with, the commit its worktree started at, and why its worktree stayed once its spawner's launch was gone, where a side job's did."""
 
@@ -195,8 +235,13 @@ class SpawnCall(Model, arbitrary_types_allowed=True):
         A session of its own, as yours is, held by lup with no terminal, in a
         worktree lup makes on a branch named after `name`, from the branch
         `start` names or the one work starts from, its environment made as
-        its room starts. Your brief is its first turn. The call returns at
-        once, while its room starts.
+        its room starts. The call returns at once, while its room starts.
+
+        It starts from your conversation so far, forked: all you and the
+        operator said, up to this call, your brief its next turn, which can
+        say just what's theirs. It starts as full as your conversation is.
+        With `fork` false it starts afresh, your brief its first turn and all
+        it knows.
 
         Two kinds, by whether you hand it a concern:
         - **A side job for you** (no `concern`), such as a search or a
@@ -254,6 +299,9 @@ class SpawnTools(MutableModel, RoomTools, arbitrary_types_allowed=True):
     mint: Callable[[str], str | None]
     """Mints a new session's id for the runtime named; none where it has no
     session held with no terminal."""
+    forking: Callable[[str], Forking | None]
+    """How the runtime named forks a session it holds; none where it forks
+    none."""
     starting: Callable[[Path], str]
     """The branch work starts from in the repository at the git directory
     given, as the declaration approved names it."""
@@ -430,6 +478,11 @@ class SpawnTools(MutableModel, RoomTools, arbitrary_types_allowed=True):
             launch, repository, self.claimed(reserved, wanted, taken), commit
         )
         try:
+            starts = await self.starts(bound, spawn, made)
+        except SpawnError as uncopied:
+            message = f"{uncopied}{await self.unmade(launch, made)}"
+            raise SpawnError(message) from uncopied
+        try:
             thread = self.handing(party, repository, spawn.concern)
         except InboxError as unopened:
             message = f"{unopened}{await self.unmade(launch, made)}"
@@ -444,11 +497,15 @@ class SpawnTools(MutableModel, RoomTools, arbitrary_types_allowed=True):
         )
 
         def spawned_as(minted: str) -> HeldLaunch:
+            forked = starts.forks is not None
             return HeldLaunch(
                 launch=minted,
                 runtime=launch.runtime,
                 worktree=made.root,
                 session=session,
+                forks=starts.forks,
+                profile=launch.profile if forked else None,
+                account=launch.account if forked else None,
                 repository=repository,
                 spawner=spawner,
                 arguments=modelled(launch.model),
@@ -498,7 +555,123 @@ class SpawnTools(MutableModel, RoomTools, arbitrary_types_allowed=True):
                 launches=[starting.launch],
             ),
         )
-        return said(made, start, sent.number, starting.log, handed)
+        return said(
+            made, start, sent.number, starting.log, handed=handed, starts=starts
+        )
+
+    async def starts(self, bound: SpawnCall, spawn: Spawn, made: Made) -> Starts:
+        """Return how the session `spawn` asks for, of `bound`'s conversation, starts in `made`: as a fork of that conversation where `spawn.fork` asks, its spawner's record copied first where its runtime finds it (`copied`); else afresh from its brief, as a subagent's spawn does, whose conversation no runtime resumes. Raise `SpawnError` where it forks and the copy can't be made, saying why."""
+        launch, party = bound.launch, bound.party
+        if not spawn.fork:
+            return Starts(said="It starts afresh, from its brief alone.")
+        if party.agent is not None:
+            return Starts(
+                said=(
+                    "It starts afresh, from its brief alone: a subagent's "
+                    "conversation can't be forked, only a session's own."
+                )
+            )
+        forking = self.forking(launch.runtime)
+        if forking is None:
+            return Starts(
+                said=(
+                    f"It starts afresh, from its brief alone: {launch.runtime} forks "
+                    "no session it holds."
+                )
+            )
+        if forking.resumable is not None:
+            await self.copied(launch, party.session, made.root, forking.resumable)
+        return Starts(
+            forks=party.session,
+            said=(
+                "It starts from your conversation so far, forked, your brief its "
+                "next turn."
+            ),
+        )
+
+    async def copied(
+        self,
+        launch: Register,
+        session: str,
+        root: Path,
+        resumable: Callable[[Path, Path, str], Path | None],
+    ) -> None:
+        """Copy the record of `launch`'s session `session` to where its runtime run in `root` finds it to fork (`resumable`), in the history the rooms of `launch`'s profile share, by `launch`'s own room, through `podman exec`, stopped past `making` and counted against its cap (`in_room`): never by the host, since the history is the rooms' to write, any path in it a link a room can plant toward the host's files, and what it does there, that room could do itself. Raise `SpawnError` where it can't be, saying why."""
+        refork = "spawn with `fork` false to start it from its brief alone"
+        home, container = launch.home, launch.container
+        if home is None or container is None:
+            message = (
+                "your launch's record names no history of its sessions' records, or "
+                f"no room, so your conversation can't be copied for it to fork: {refork}"
+            )
+            raise SpawnError(message)
+        source = resumable(home, launch.worktree, session)
+        copy = resumable(home, root, session)
+        if source is None or copy is None:
+            message = (
+                "your worktree's path or its is too long for lup to name the folder "
+                "your runtime keeps its records in, so your conversation can't be "
+                f"copied for it to fork: {refork}"
+            )
+            raise SpawnError(message)
+        program = Program(
+            command=[
+                "podman",
+                "exec",
+                container,
+                "install",
+                "-D",
+                "-m",
+                "600",
+                "--",
+                str(source),
+                str(copy),
+            ],
+            payload="",
+            directory=launch.repository,
+            within=self.making,
+            kept=self.heard,
+        )
+        ran = await self.in_room(launch, program)
+        if ran.status != 0:
+            said = ran.said() or f"it ended with status {ran.status}"
+            message = f"your conversation wasn't copied for it to fork: {said}"
+            raise SpawnError(message)
+
+    async def forked(self, launch: Register) -> None:
+        """Remove the copy of its spawner's record that `launch`'s session, forked through `spawn`, started from (`copied`), once its start is heard: its runtime read the conversation as it started, and keeps it in a record of its own from its first turn, so the copy would only read as its spawner's session a second time. By `launch`'s own room, through `podman exec`, as the copy was made by its spawner's; where it can't be, the service's log says so, and it stays."""
+        spawner, home = launch.spawner, launch.home
+        forking = self.forking(launch.runtime)
+        resumable = None if forking is None else forking.resumable
+        container = launch.container
+        if (
+            spawner is None
+            or home is None
+            or container is None
+            or resumable is None
+            or spawner.conversation.session == launch.session
+        ):
+            return
+        copy = resumable(home, launch.worktree, spawner.conversation.session)
+        if copy is None:
+            return
+        program = Program(
+            command=["podman", "exec", container, "rm", "-f", "--", str(copy)],
+            payload="",
+            directory=launch.repository,
+            within=self.making,
+            kept=self.heard,
+        )
+        stays = f"{launch.launch}: the copy of its spawner's record it forked, {copy}, stays"
+        try:
+            ran = await self.in_room(launch, program)
+        except SpawnError as capped:
+            self.delivery.say(f"{stays}: {capped}")
+            return
+        if ran.status != 0:
+            self.delivery.say(
+                f"{stays}: {ran.said() or f'its removal ended with status {ran.status}'}"
+            )
 
     def handing(
         self, party: Conversation, repository: Path, said: str | None
@@ -644,6 +817,7 @@ class SpawnTools(MutableModel, RoomTools, arbitrary_types_allowed=True):
                         "launch": minted,
                         "session": None,
                         "resume": session,
+                        "forks": None,
                         "spawner": spawner,
                         "arguments": arguments,
                     }
@@ -1109,6 +1283,10 @@ class Respawns(Model, Respawning, arbitrary_types_allowed=True):
     def elsewhere(self, repository: Path, named: str) -> Path:
         return self.tools.elsewhere(repository, named)
 
+    @override
+    async def forked(self, launch: Register) -> None:
+        await self.tools.forked(launch)
+
 
 async def started_at(git: Git, start: str, within: timedelta) -> str:
     """Return the commit the local branch `start` is at, read by git pinned to the repository's common directory, in the repository's own threads (`threaded`), stopped past `within`; raise `SpawnError` where `start` isn't a branch's short name, names no branch there, or git can't read it in time."""
@@ -1187,12 +1365,20 @@ def modelled(model: str | None) -> list[str]:
     return [] if model is None else ["--model", model]
 
 
-def said(made: Made, start: str, brief: int, log: Path, handed: Thread | None) -> str:
-    """Say what a spawn started: its name, where it works, which kind it is and where what it says goes."""
+def said(
+    made: Made,
+    start: str,
+    brief: int,
+    log: Path,
+    *,
+    handed: Thread | None,
+    starts: Starts,
+) -> str:
+    """Say what a spawn started: its name, where it works, what it starts from, which kind it is and where what it says goes."""
     where = (
         f"`{made.branch}` is starting, in {made.root} on its branch `{made.branch}`, "
-        f"from `{start}`, at {made.commit}; its brief is @{brief}, its first "
-        f"turn, and its launcher writes to {log}."
+        f"from `{start}`, at {made.commit}; its brief is @{brief}, and its "
+        f"launcher writes to {log}. {starts.said}"
     )
     if handed is None:
         return (

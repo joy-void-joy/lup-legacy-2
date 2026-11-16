@@ -52,6 +52,17 @@ class Holding(Model, arbitrary_types_allowed=True):
     resuming: Callable[[str], list[str]]
     """The arguments resuming the session of the id given; raising `ValueError`
     for an id that can't be one of the runtime's."""
+    forking: Callable[[str, str], list[str]] | None = None
+    """The arguments starting a new session under the second id given as a
+    fork of the first, holding all it said; raising `ValueError` for an id that
+    can't be one of the runtime's. None where the runtime forks no session it
+    holds, a gap its module declares."""
+    resumable: Callable[[Path, Path, str], Path | None] | None = None
+    """Where the runtime run in a directory finds a session to resume or fork:
+    the history its rooms share, the directory and the session's id in, the
+    session's record out, which a fork run elsewhere needs copied there first;
+    none where it can't be said. None where the runtime finds a session by its
+    id alone, wherever it runs."""
     session: Callable[[Pipes, Callable[[str], None]], HeldSession]
     """The session held over the room's pipes, saying what it does through the
     function given."""

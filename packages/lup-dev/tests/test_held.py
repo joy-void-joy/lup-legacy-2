@@ -581,7 +581,7 @@ class Played(HostClient):
                 elif "`trial builder`" in text:
                     builder = self.spawned("trial-builder", 5)
                     self.item(self.conversation, Operator(), "SENT")
-                    self.item(builder, Operator(), "FIG")
+                    self.item(builder, Operator(), "PAPAYA")
                 elif "time.sleep" in text or "wait_inbox" in text:
                     self.calling.append(True)
                 elif answer is not None:
@@ -637,7 +637,7 @@ class Played(HostClient):
                     update={"launch": f"{launch}-2", "session": sender.session}
                 )
                 self.served.append(again)
-                self.item(sender, Operator(), "FIG")
+                self.item(sender, Operator(), "PAPAYA")
                 return reply.model_validate(Shown(item=replied).model_dump())
             case _:
                 return reply.model_validate(Done().model_dump())

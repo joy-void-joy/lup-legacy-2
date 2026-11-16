@@ -927,6 +927,10 @@ class Respawning(ABC):
     def elsewhere(self, repository: Path, named: str) -> Path:
         """Return the git directory of the repository the one at `repository` lets its sessions file concerns into, and spawn in, by the name `named`; raise `InboxError` where it names none."""
 
+    @abstractmethod
+    async def forked(self, launch: Register) -> None:
+        """Tidy what `launch`'s session, forked from their spawner's conversation through lup's `spawn`, was started from, once their start is heard, by which their runtime holds that conversation."""
+
 
 class HoldAnswering(ABC):
     """Where the operator's answer to a held change goes: to the hook that waits on it, and, where none heard it, to the conversation that made it (`cli.py` gives it)."""
@@ -1004,7 +1008,8 @@ class Delivery(MutableModel, Post, arbitrary_types_allowed=True):
     thread of their repository is parked until has closed, through GitHub
     (`lup_dev.policy.coming`); none looks at nothing."""
     looks: list[asyncio.Task[None]] = []
-    """Each look `starting` began, kept until it's done."""
+    """Each look `starting` began, and each fork's tidying a start began
+    (`Respawning.forked`), kept until it's done."""
     respawning: Respawning | None = None
     """What brings a session lup started back once it ended, an item that
     would wake it waiting for it, and finds the repositories another lets its
@@ -1112,9 +1117,21 @@ class Delivery(MutableModel, Post, arbitrary_types_allowed=True):
                         *(each for each in self.looks if not each.done()),
                         task,
                     ]
+                respawning = self.respawning
+                if (
+                    heard.forked
+                    and party.agent is None
+                    and launch.spawner is not None
+                    and respawning is not None
+                ):
+                    task = asyncio.create_task(respawning.forked(launch))
+                    self.looks = [
+                        *(each for each in self.looks if not each.done()),
+                        task,
+                    ]
                 spawned = (
-                    [self.introduced(launch)]
-                    if heard.fresh
+                    [self.introduced(launch, forked=heard.forked)]
+                    if (heard.fresh or heard.forked)
                     and party.agent is None
                     and launch.spawner is not None
                     else []
@@ -1507,12 +1524,21 @@ class Delivery(MutableModel, Post, arbitrary_types_allowed=True):
         spawner = launch.spawner.conversation
         return None if spawner == party else spawner
 
-    def introduced(self, launch: Register) -> str:
-        """Say, in lup's words, what a session an agent spawned through lup is, as their session starts: whose they are, where they work, and where what they say goes, a side job's report back to their spawner, a builder's into the concern handed them, theirs; and where its host code is the copy approved, not the tip's, which a spawn never asks about (`Register.behind`), both, so they can ask the operator for the newer."""
+    def introduced(self, launch: Register, *, forked: bool = False) -> str:
+        """Say, in lup's words, what a session an agent spawned through lup is, as their session starts: whose they are, where they work, and where what they say goes, a side job's report back to their spawner, a builder's into the concern handed them, theirs; where its host code is the copy approved, not the tip's, which a spawn never asks about (`Register.behind`), both, so they can ask the operator for the newer; and, `forked`, that what they hold is their spawner's conversation, not theirs, up to the call that spawned them, which their runtime shows as cut short, so they neither take themselves for their spawner nor spawn again."""
         spawner = launch.spawner
         if spawner is None:
             return ""
         who = self.roster().who(spawner.conversation)
+        forking = (
+            f" You're a fork of {who}'s conversation: what's above is theirs, up "
+            "to their call to lup's `spawn`, which started you and worked, "
+            "whatever its result above says. From here on you're "
+            f"`{launch.name or launch.launch}`, not them: work in {launch.worktree}, "
+            "not the worktree your history worked in, which stays theirs."
+            if forked
+            else ""
+        )
         where = (
             f"in a room and a worktree of your own, {launch.worktree}, on its "
             "own branch"
@@ -1539,7 +1565,7 @@ class Delivery(MutableModel, Post, arbitrary_types_allowed=True):
                 "your turn saying is your report, handed to them whole, and you end "
                 "there, so end it with what they asked for. `send` to `parent` "
                 "reaches them meanwhile, and what they send you after resumes you, "
-                f"with all you know so far.{running}"
+                f"with all you know so far.{running}{forking}"
             )
         # Its title is free text, its spawner's where they opened it with the
         # spawn: set apart as someone's words, never said in lup's voice.
@@ -1553,7 +1579,7 @@ class Delivery(MutableModel, Post, arbitrary_types_allowed=True):
             "theirs to decide, and land your own branch. "
             f"{who} hears when you end, not what you report; `send` to `parent` "
             "reaches them where their brief is wrong on what matters. Their brief "
-            f"comes as your first turn.{running}\nIts title, in the words of "
+            f"comes as your first turn.{running}{forking}\nIts title, in the words of "
             f"whoever opened it:\n{titled.written()}"
         )
 

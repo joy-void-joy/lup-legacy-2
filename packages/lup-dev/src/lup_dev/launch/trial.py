@@ -33,9 +33,11 @@ would mean:
 8. **resumes its side job:** asked to, the session `send`s the side job a
    question; it's resumed held with what it knew, its answer reaches the
    session, which answers with it, and it ends again;
-9. **hands a concern over:** asked to, the session spawns one with a concern;
-   its turn's end reaches the operator, who talks with it directly, and the
-   session hears nothing of it;
+9. **hands a concern over:** asked to, the session spawns one with a concern,
+   forked from its conversation, which answers with the word the operator first
+   asked the session for, that conversation's alone; its turn's end reaches
+   the operator, who talks with it directly, and the session hears nothing of
+   it;
 10. **ends:** the host ends the session and its room;
 11. **a builder outlives its spawner:** the one handed a concern runs on once
    the session ended, until the trial ends it;
@@ -373,7 +375,8 @@ print(len(found))
             Stage(
                 name="hands a concern over",
                 meaning=(
-                    "a session handed a concern with its spawn doesn't answer the "
+                    "a session handed a concern with its spawn doesn't start from "
+                    "its spawner's conversation, forked, doesn't answer the "
                     "operator directly, or its spawner hears what it says: what "
                     "it reports doesn't land where the operator reads it"
                 ),
@@ -755,13 +758,14 @@ print(len(found))
         return launch in [each.launch for each in self.host.launches()]
 
     def handed_over(self) -> str:
-        """Have the session spawn one with a concern, see its turn's end reach the operator, who talks with it directly, and the session hear nothing of it."""
+        """Have the session spawn one with a concern, forked from its conversation, see it answer with what only that conversation holds, the word the operator first asked the session for, its turn's end reaching the operator, who talks with it directly, and the session hear nothing of it."""
         launch = self.launch()
         sent = self.sent(
             "Call lup's `spawn` tool with `name` `trial builder`, `concern` `Spawn's "
             "trial: a concern handed over`, no `start`, and the `brief`: Answer with "
-            "the single word FIG, and nothing else. Then answer me with the single "
-            "word SENT, and nothing else."
+            "the single word the operator first asked for in this conversation, and "
+            "nothing else. Then answer me with the single word SENT, and nothing "
+            "else."
         )
         self.until(
             lambda: self.answer(sent, "SENT") is not None,
@@ -777,8 +781,9 @@ print(len(found))
         party = self.party_of(builder)
         self.builder_party = party
         self.until(
-            lambda: self.said_by(party, "FIG") is not None,
-            f"no turn's end of theirs holding FIG reached you within {self.patience}",
+            lambda: self.said_by(party, "PAPAYA") is not None,
+            "no turn's end of theirs holding PAPAYA, the word only its spawner's "
+            f"conversation held, reached you within {self.patience}",
         )
         briefed = self.briefed(party)
         asked = self.host.ask(
@@ -847,8 +852,8 @@ print(len(found))
         )
         self.spawned = [*self.spawned, restarted]
         self.until(
-            lambda: self.said_by(party, "FIG", after=reply.number) is not None,
-            f"no answer of theirs holding FIG came within {self.patience}",
+            lambda: self.said_by(party, "PAPAYA", after=reply.number) is not None,
+            f"no answer of theirs holding PAPAYA came within {self.patience}",
         )
         self.end(restarted)
         return (
@@ -1173,8 +1178,9 @@ print(len(found))
                 "your words as its turns, answers into your inbox, stops at an "
                 "interrupt, outlives a restart of the host service, spawns a "
                 "side job whose report comes back to it, ending there, and "
-                "resumes it with a `send`, hands a concern over to one you "
-                "talk with directly, which outlives it and which your reply "
+                "resumes it with a `send`, hands a concern over to one forked "
+                "from its conversation, which you talk with directly, which "
+                "outlives it and which your reply "
                 "restarts once it ended, ends, tells you of its side job's "
                 "worktree left, resumes, and passes to a terminal and back. A "
                 "launch's setup "

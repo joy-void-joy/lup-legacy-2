@@ -510,6 +510,7 @@ class SessionStart(Payload):
             judged=True,
             fits=fits,
             fresh=self.source in get_args(FreshStart.__value__) and not self.agent_id,
+            forked=self.source == "fork" and not self.agent_id,
             anew=self.source in get_args(NewProcess.__value__) and not self.agent_id,
         )
 
