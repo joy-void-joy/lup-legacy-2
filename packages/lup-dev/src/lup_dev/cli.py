@@ -259,6 +259,7 @@ from lup_dev.launch.room import (
     receiving,
     refreshed,
     related,
+    room_copy,
     room_git,
     unclaimed,
     unlent,
@@ -2598,10 +2599,12 @@ def launched(
             command=declared.resolved.runner.command(["lup-dev", "check", "--at"]),
             refs=declared.resolved.limits.gated,
         )
+        copied = room_copy(approval.tool, launcher.layout.judge(repository), own)
+        copying = [] if copied is None else copied.mounts
         git = room_git(
             repository,
             own,
-            [*room.mounts, *ages.mounts, *compiled.mounts],
+            [*room.mounts, *ages.mounts, *compiled.mounts, *copying],
             gating,
         )
         registered = Register(
@@ -2669,6 +2672,8 @@ def launched(
                 try:
                     cleared(launcher.podman, served.container, launcher.say)
                     git.write()
+                    if copied is not None:
+                        copied.write()
                     clipboard = RoomClipboard(launch=own)
                     clipboard.write()
                     ages.write()
@@ -2685,6 +2690,7 @@ def launched(
                                 *hiding.mounts,
                                 *git.mounts,
                                 *ages.mounts,
+                                *copying,
                                 Mount(source=sockets, target=RoomPaths().sockets),
                                 receives,
                             ],
