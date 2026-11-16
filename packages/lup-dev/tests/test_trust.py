@@ -2355,9 +2355,7 @@ def test_uv_fetches_builds_and_installs_the_commit_pinned_held_to_its_pins(
     )
     copy = CopyLayout(home=tmp_path / "judges" / "harmon" / "copies" / "a1")
     host = Host({"node": "26.7.0", "uv": "0.12.5"})
-    UvToolchain(executable=str(fake), tools=host).install(
-        tool, tmp_path, "unused", copy, users=False
-    )
+    UvToolchain(executable=str(fake), tools=host).fetched(tool, copy)
     how, _, source = mark.read_text().partition(": ")
     ran, _, where = how.partition(" in ")
     assert ran == "marking"
