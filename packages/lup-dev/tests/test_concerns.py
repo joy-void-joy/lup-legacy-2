@@ -1655,6 +1655,29 @@ def test_a_spawn_whose_session_never_came_up_reaches_its_spawner_as_a_problem(
     assert not item.quiet
 
 
+def test_a_side_job_resumed_whose_session_never_came_up_reaches_its_spawner_too(
+    delivery: Delivery, tmp_path: Path
+) -> None:
+    """Resumed by its spawner's `send`, its launcher names the session it resumes rather than one it starts: the problem is from that one."""
+    launched(delivery, "dev", "s1")
+    layout = Layout(state=tmp_path / "state", runtime=tmp_path / "run")
+    tools = SpawnTools.model_construct(delivery=delivery, layout=layout)
+    spec = HeldLaunch(
+        launch="h2",
+        runtime="claude",
+        worktree=Path("/work/x"),
+        resume="c1",
+        spawner=Spawner(launch="dev", conversation=main("s1")),
+    )
+
+    asyncio.run(tools.lost(spec))
+    item = delivery.inbox.item(newest(delivery))
+
+    assert (item.sender, item.recipient) == (main("c1"), main("s1"))
+    assert isinstance(item.reason, Message)
+    assert item.reason.kind == "problem"
+
+
 def test_a_side_job_s_report_to_a_subagent_who_ended_reaches_their_session(
     delivery: Delivery, clock: FakeClock
 ) -> None:

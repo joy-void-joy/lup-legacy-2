@@ -118,6 +118,7 @@ from lup_dev.approval import (
     Approval,
     GitTool,
     ReleaseTool,
+    Spawnable,
     Tool,
     WorkspaceTool,
     approved,
@@ -651,7 +652,7 @@ def reinstalled(approval: Approval, *, again: bool) -> str:
 
 
 class BranchesRead(Model):
-    """The branches a declaration just approved names, what the approval's answer says of them, and the declaration as judging reads it."""
+    """The branches a declaration just approved names, what the approval's answer says of them, the declaration as judging reads it, and the other repositories it lets its sessions spawn in."""
 
     branches: Branches
     said: str | None = None
@@ -659,6 +660,9 @@ class BranchesRead(Model):
     as they did."""
     declaration: Declaration | None = None
     """What the approval keeps of it (`Approval.declaration`): where it doesn't
+    load, what the approval before kept."""
+    spawnable: list[Spawnable] = []
+    """What the approval keeps of them (`Approval.spawnable`): where it doesn't
     load, what the approval before kept."""
 
 
@@ -2420,6 +2424,7 @@ class Trust(Model, arbitrary_types_allowed=True):
             profiles=zone.profiles,
             branches=read.branches,
             declaration=read.declaration,
+            spawnable=read.spawnable,
         )
         if now is not None and now.commit == zone.commit and now.tool == zone.tool:
             # Only the person's own layer or their profiles changed, which the
@@ -2450,12 +2455,16 @@ class Trust(Model, arbitrary_types_allowed=True):
         return Unanswered(commit=zone.commit, approval=now, said=switch.report())
 
     def read_branches(self, zone: Zone, now: Approval | None) -> BranchesRead:
-        """Read the branches the declaration at `zone`'s commit names, and the declaration as judging reads it, its person's own layer on it: what the operator has just approved, so it may run.
+        """Read the branches the declaration at `zone`'s commit names, the declaration as judging reads it, and the other repositories it lets its sessions spawn in, its person's own layer on it: what the operator has just approved, so it may run.
 
         Exported from git's objects and imported as a launch imports the
         declaration approved (`approved_declaration`). Where it doesn't load,
         they stay what `now` says, as the judge's last declaration that loaded
-        stands in for one that can't, and the answer says so.
+        stands in for one that can't, and the answer says so. A repository it
+        lets its sessions spawn in is found on the host as a launch finds the
+        repositories it relates (`related`): its path from the directory
+        holding this one's main worktree, read from its git directory, or
+        absolute.
         """
         before = Branches() if now is None else now.branches
         try:
@@ -2465,8 +2474,21 @@ class Trust(Model, arbitrary_types_allowed=True):
                 if zone.local is not None:
                     CheckoutLayout(root=source).local_declaration.write_text(zone.local)
                 declared = load(source)
-                after = resolve(declared.project).branches
+                resolved = resolve(declared.project)
+                after = resolved.branches
                 declaration = Declaration.of(declared.project, declared.source)
+                # Not from git's list of worktrees, which follows a `commondir`
+                # a room can plant where trust runs unpinned: from the git
+                # directory approvals are kept by, a clone's `.git` or a bare
+                # repository's own, as its main worktree is.
+                common = self.repository()
+                main = common.parent if common.name == ".git" else common
+                holding = main.parent
+                spawnable = [
+                    Spawnable(name=each.name, path=each.on_host(holding))
+                    for each in resolved.repositories
+                    if each.spawn
+                ]
         except ProjectError as failure:
             said = (
                 f"The branches stay `{before.integration}` to integrate on and "
@@ -2477,11 +2499,13 @@ class Trust(Model, arbitrary_types_allowed=True):
                 branches=before,
                 said=said,
                 declaration=None if now is None else now.declaration,
+                spawnable=[] if now is None else now.spawnable,
             )
         return BranchesRead(
             branches=after,
             said=branches_moved(before, after),
             declaration=declaration,
+            spawnable=spawnable,
         )
 
     def reapproved(self, recorded: Approval, copy: JudgeLayout) -> None:

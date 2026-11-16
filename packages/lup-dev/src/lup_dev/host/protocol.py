@@ -286,6 +286,11 @@ class Spawner(Model):
     """The thread handed to the spawned session with it, by its number, which it
     holds and works in, and where its reports land: a concern handed over to
     build. None for a side job, whose report comes back to its spawner."""
+    restarted: bool = False
+    """The operator's words restarted it once it had ended, as the host
+    recorded it: a side job so runs to its next report whatever became of its
+    spawner's launch, since it answers them, where one whose spawner's launch
+    ended otherwise ends with it (`orphaned`)."""
 
 
 class Behind(Model):
@@ -384,6 +389,15 @@ class Register(Request, reads=False):
     approved: the copy approved it runs, which its session is told as it
     starts, so an agent needing the newer can ask the operator for it. None
     where it runs the tip's."""
+    profile: str | None = None
+    """The profile it runs on, by name, as its launcher chose it: a session it
+    forks through lup's `spawn` runs on it too, so both keep their records in
+    one history (`SpawnTools.forked`). None in a record from before launches
+    kept it."""
+    account: str | None = None
+    """The account its runtime logs in with, as its launcher chose it, which a
+    session it forks logs in with too. None in a record from before launches
+    kept it."""
 
 
 class Rename(Request, reads=False):

@@ -30,6 +30,7 @@ from lup_dev.approval import (
     Approval,
     GitTool,
     ReleaseTool,
+    Spawnable,
     Tool,
     WorkspaceTool,
     approved_branches,
@@ -3217,6 +3218,40 @@ project = Project(modules=Modules().add(Versions(running="live")))
     assert outcome.approval.branches == Branches(integration="dev", running="live")
     assert outcome.report().endswith("`land` lands on it.")
     assert trusting(lup, kit, unasked()).check().zone.commit == live
+
+
+def test_an_approval_keeps_the_repositories_the_person_s_layer_lets_its_sessions_spawn_in(
+    lup: Path, kit: Kit, shell: Shell
+) -> None:
+    """Found on the host as a launch finds a related repository: from the directory holding this one's main worktree, or absolute. One it doesn't let them stays out."""
+    del shell
+    layered(
+        lup,
+        '''"""The person's own layer, letting sessions spawn in one neighbour."""
+
+from pathlib import Path
+
+from lup_dev import Module, Modules, Project, Repositories, Repository
+
+
+class Mine(Module):
+    """The person's neighbours."""
+
+    name = "mine"
+    repositories: Repositories = Repositories.of(
+        Repository(name="yonder", path=Path("yonder.git"), about="a neighbour", spawn=True),
+        Repository(name="read", path=Path("/srv/read.git"), about="read alone"),
+    )
+
+
+project = Project(modules=Modules().add(Mine()))
+''',
+    )
+    outcome = trusting(lup, kit, yes()).ensure()
+    assert isinstance(outcome, Trusted)
+    assert outcome.approval.spawnable == [
+        Spawnable(name="yonder", path=(lup.parent / "yonder.git").resolve())
+    ]
 
 
 def test_a_record_from_before_approvals_kept_the_branches_reads_dev(

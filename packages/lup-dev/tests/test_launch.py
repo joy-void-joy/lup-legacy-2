@@ -781,6 +781,8 @@ def test_a_launch_runs_each_step_in_order_and_ends_its_registration(
         runner=[],
         home=machine.layout.room_home(project / ".git", "claude", shared=False),
         own=machine.layout.launch(launch).runtime_home,
+        profile="default",
+        account="default",
     )
     run = machine.engine.run()
     assert f"--name={container}" in run
@@ -2819,6 +2821,54 @@ def test_a_launch_an_agent_spawned_registers_its_spawner_and_runs_the_session_th
     assert held.spawner == spawner
     assert held.session == minted
     assert machine.engine.held_run[-2:] == ["--session-id", minted]
+
+
+def test_a_launch_an_agent_forked_runs_the_session_the_host_minted_holding_its_spawner_s_conversation(
+    project: Path, tmp_path: Path, clock: FakeClock, sockets: Path
+) -> None:
+    """A launch forking its spawner's session runs the session the host minted, which hooks name, holding all the spawner's said, and records the profile and account it runs on, which the sessions it forks run on too."""
+    machine = Machine(tmp_path, clock, sockets=sockets)
+    forked = "0f6b1d2e-6a62-4a39-9a8c-1f2d3e4f5a6b"
+    spawner = Spawner(
+        launch="s0",
+        conversation=Conversation(
+            repository=project / ".git", runtime="claude", session=forked
+        ),
+    )
+    minted = "4f1e0c58-6d1d-4c35-9d0a-3b1c5a0f2e11"
+    spawned = holding(project).model_copy(
+        update={
+            "spawner": spawner,
+            "session": minted,
+            "forks": forked,
+            "repository": project / ".git",
+        }
+    )
+    machine.engine.lingering = True
+
+    def heard() -> None:
+        machine.engine.started.wait(10)
+        machine.host.heard.append(minted)
+
+    hearing = threading.Thread(target=heard)
+    hearing.start()
+    thread, statuses = in_background(machine, spawned)
+    assert machine.host.up.wait(10)
+    hearing.join()
+    asked(machine.layout.launch("h1").held, HeldEnd(), Done, timedelta(seconds=10))
+    thread.join(10)
+
+    assert statuses == [0]
+    [held] = [each for each in machine.host.served if each.launch == "h1"]
+    assert held.session == minted
+    assert (held.profile, held.account) == ("default", "default")
+    assert machine.engine.held_run[-5:] == [
+        "--resume",
+        forked,
+        "--fork-session",
+        "--session-id",
+        minted,
+    ]
 
 
 def a_repository_elsewhere(tmp_path: Path, shell: Shell) -> tuple[Path, Path]:

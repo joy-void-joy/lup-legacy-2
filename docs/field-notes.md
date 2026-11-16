@@ -1183,6 +1183,15 @@ Behind #117. **Claude Code** on Haiku 5.5, on a subscription login: `claude -p -
 - **`sessionTitle` does what `/rename` does.** `SessionStart`'s at startup, and `UserPromptSubmit`'s, each wrote a `custom-title` and an `agent-name` line with it, the two lines `/rename` writes. The next `UserPromptSubmit`, and a resume's `SessionStart`, carry it as `session_title`, so after lup's first start every resume brings lup's own earlier title; `sessionTitle` at a resume sets it again. Each resume writes the current title's two lines again.
 - **A subagent on screen** (interactive): the panel below the prompt shows the `Agent` call's `name`, else the subagent's type, then the call's `description`; the call's line and its end show the description (`Agent (quote test)`, `Agent "quote test" finished`), and what they send comes `from @<name or type>`. No hook sets it: `SubagentStart` takes context alone (*hooks*).
 
+## A fork of a session (Claude Code 2.1.325, measured 2026-11-16)
+
+For `docs/launch.md`, *An agent's spawn*: real sessions on Haiku, in a scratch home of Claude Code's own (`CLAUDE_CONFIG_DIR`), a parent started with `--session-id` in one directory and forked from another, by `-p` and held over stream-json as lup's launcher holds one.
+- **`--resume <parent> --fork-session --session-id <new>` forks under the id given.** The fork's `SessionStart` comes with `source` `fork` and that id, and its record is `<new>.jsonl`.
+- **It's found only among the records of the directory it runs in.** Run in another directory with no copy there, it ends at once: "No conversation found with session ID". With the parent's `<parent>.jsonl` copied into that directory's folder of `projects/`, it forks, and recalls what only the parent was told.
+- **The copy is read as the process starts.** Held over stream-json, the copy removed the moment `SessionStart` ran, before any turn, the fork still answered from the parent's conversation. Its own record isn't written until its first turn, and then begins with every line of the parent's: the same `uuid`, `parentUuid` and `timestamp`, `sessionId` and `cwd` rewritten to its own, nothing marking them as copied.
+- **A parent forked mid-call** (its record ending on a `tool_use` with no result) gives the fork that call with a result Claude Code writes: "Tool call interrupted: the session ended before this call's result was recorded, so its outcome is unknown. Check whether it took effect before relying on it". A fork through `spawn` is forked in the middle of that very call.
+- **The fork's first turn reads the parent's conversation from the prompt cache:** 24,191 tokens read from it and 804 written, of 25k, its system prompt the same, its directory another.
+
 ## A conversation resumed in a later launch (read 2026-10-16)
 
 For `docs/launch.md`, *Guidance*: Claude Code's docs (code.claude.com/docs/en: *hooks*, *cli-reference*, *sessions*) and its 2.1.301 binary's help; Codex's docs (developers.openai.com/codex: *hooks*, *config-reference*) and its source at `rust-v0.163.0` (paths under `codex-rs/`), the same at `rust-v0.162.1` where checked.

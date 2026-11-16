@@ -33,21 +33,29 @@ would mean:
 8. **resumes its side job:** asked to, the session `send`s the side job a
    question; it's resumed held with what it knew, its answer reaches the
    session, which answers with it, and it ends again;
-9. **hands a concern over:** asked to, the session spawns one with a concern;
-   its turn's end reaches the operator, who talks with it directly, and the
-   session hears nothing of it;
+9. **hands a concern over:** asked to, the session spawns one with a concern,
+   forked from its conversation, which answers with the word the operator first
+   asked the session for, that conversation's alone; its turn's end reaches
+   the operator, who talks with it directly, and the session hears nothing of
+   it;
 10. **ends:** the host ends the session and its room;
 11. **a builder outlives its spawner:** the one handed a concern runs on once
    the session ended, until the trial ends it;
-12. **resumes held:** the session resumes held, its conversation kept;
-13. **a terminal takes it over:** a terminal launch resuming it finds it held,
+12. **your reply restarts the builder:** the operator's reply to its turn's end
+   restarts it held, with all it knew, and it answers;
+13. **a side job's worktree left is told:** once the launch that spawned it
+   ended, the sweep tells the operator the session's side job's worktree
+   stays, nothing on its branch lost removing it, and leaves it;
+14. **resumes held:** the session resumes held, its conversation kept;
+15. **a terminal takes it over:** a terminal launch resuming it finds it held,
    ends it (`--take-over`, asking nothing and answering nothing), and runs a
    turn of its own on it;
-14. **back to held:** held again, it has the terminal's turn in its record.
+16. **back to held:** held again, it has the terminal's turn in its record.
 
 What it doesn't try: the runtime with no held session yet, holds of hours, a
 dashboard's own clicks, a real interactive terminal (its turn runs with `-p`,
-in the terminal's own launch), and a spawn in another repository.
+in the terminal's own launch), and a spawn in another repository, which lup
+refuses yet.
 """
 
 import asyncio
@@ -69,6 +77,7 @@ from lup_dev.host.held import End, HeldUp, Interrupt
 from lup_dev.host.protocol import Done, HostError, Listed, Register
 from lup_dev.host.service import Program, executed
 from lup_dev.inbox.protocol import (
+    AnswerItem,
     Exchanged,
     FileReport,
     FinishItem,
@@ -78,6 +87,7 @@ from lup_dev.inbox.protocol import (
 )
 from lup_dev.inbox.store import Message, Told
 from lup_dev.inbox.texts import written
+from lup_dev.launch.hidden import removed
 from lup_dev.launch.room import repository
 from lup_ledger.parties import Conversation, Operator
 
@@ -278,6 +288,8 @@ print(len(found))
     """The side job the session spawned, once it's served."""
     builder: Register | None = None
     """The session the trial's session handed a concern, once it's served."""
+    builder_party: Conversation | None = None
+    """The builder's own conversation, as the inbox knows it, once it's heard."""
     spawned: list[Register] = []
     """Each launch the trial's session spawned, whose worktree and branch go
     with the trial's own."""
@@ -363,7 +375,8 @@ print(len(found))
             Stage(
                 name="hands a concern over",
                 meaning=(
-                    "a session handed a concern with its spawn doesn't answer the "
+                    "a session handed a concern with its spawn doesn't start from "
+                    "its spawner's conversation, forked, doesn't answer the "
                     "operator directly, or its spawner hears what it says: what "
                     "it reports doesn't land where the operator reads it"
                 ),
@@ -382,6 +395,24 @@ print(len(found))
                     "the operator's to end"
                 ),
                 tried=self.builder_outlived,
+            ),
+            Stage(
+                name="your reply restarts the builder",
+                meaning=(
+                    "the operator's words to a spawned session that ended don't "
+                    "restart it, or it forgot what it knew: a reply to it waits on "
+                    "nobody"
+                ),
+                tried=self.builder_restarted,
+            ),
+            Stage(
+                name="a side job's worktree left is told",
+                meaning=(
+                    "the operator isn't told of a side job's worktree left once "
+                    "the launch that spawned it ended, or lup removed it: the "
+                    "sweep's look at what's left is broken"
+                ),
+                tried=self.side_job_left,
             ),
             Stage(
                 name="resumes held",
@@ -727,13 +758,14 @@ print(len(found))
         return launch in [each.launch for each in self.host.launches()]
 
     def handed_over(self) -> str:
-        """Have the session spawn one with a concern, see its turn's end reach the operator, who talks with it directly, and the session hear nothing of it."""
+        """Have the session spawn one with a concern, forked from its conversation, see it answer with what only that conversation holds, the word the operator first asked the session for, its turn's end reaching the operator, who talks with it directly, and the session hear nothing of it."""
         launch = self.launch()
         sent = self.sent(
             "Call lup's `spawn` tool with `name` `trial builder`, `concern` `Spawn's "
             "trial: a concern handed over`, no `start`, and the `brief`: Answer with "
-            "the single word FIG, and nothing else. Then answer me with the single "
-            "word SENT, and nothing else."
+            "the single word the operator first asked for in this conversation, and "
+            "nothing else. Then answer me with the single word SENT, and nothing "
+            "else."
         )
         self.until(
             lambda: self.answer(sent, "SENT") is not None,
@@ -747,9 +779,11 @@ print(len(found))
         self.spawned = [*self.spawned, builder]
         apart = self.apart(launch, builder)
         party = self.party_of(builder)
+        self.builder_party = party
         self.until(
-            lambda: self.said_by(party, "FIG") is not None,
-            f"no turn's end of theirs holding FIG reached you within {self.patience}",
+            lambda: self.said_by(party, "PAPAYA") is not None,
+            "no turn's end of theirs holding PAPAYA, the word only its spawner's "
+            f"conversation held, reached you within {self.patience}",
         )
         briefed = self.briefed(party)
         asked = self.host.ask(
@@ -791,6 +825,58 @@ print(len(found))
             raise TrialError(message)
         self.end(builder)
         return "The one handed a concern ran on until the trial ended it."
+
+    def builder_restarted(self) -> str:
+        """Reply to the ended builder's turn's end as the operator does, and see the reply restart it held, answering with what it knew."""
+        builder, party = self.builder, self.builder_party
+        if builder is None or party is None:
+            message = "the session handed no one a concern"
+            raise TrialError(message)
+        ending = self.said_by(party, "DATE")
+        if ending is None:
+            message = "the builder left no turn's end to reply to"
+            raise TrialError(message)
+        reply = self.host.ask(
+            AnswerItem(
+                number=ending.number,
+                comment=(
+                    "Which single word did you first answer with? Answer with that "
+                    "word alone."
+                ),
+            ),
+            Shown,
+        ).item
+        restarted = self.found(
+            lambda: self.resumed_of(builder),
+            "your reply restarted no launch of the builder's session",
+        )
+        self.spawned = [*self.spawned, restarted]
+        self.until(
+            lambda: self.said_by(party, "PAPAYA", after=reply.number) is not None,
+            f"no answer of theirs holding PAPAYA came within {self.patience}",
+        )
+        self.end(restarted)
+        return (
+            f"Your reply, @{reply.number}, restarted `{builder.name}` held, as launch "
+            f"{restarted.launch}; it answered with the word it first answered, and "
+            "the trial ended it."
+        )
+
+    def side_job_left(self) -> str:
+        """See the operator told the session's side job's worktree stays, once the launch that spawned it ended."""
+        side = self.side
+        if side is None:
+            message = "the session spawned no side job"
+            raise TrialError(message)
+        party = self.party_of(side)
+        self.until(
+            lambda: self.said_by(party, "stays, though the launch") is not None,
+            f"you weren't told within {self.patience} that its worktree, "
+            f"{side.worktree}, stays",
+        )
+        told = self.said_by(party, "stays, though the launch")
+        number = "" if told is None else f", @{told.number}"
+        return f"You were told its worktree, {side.worktree}, stays{number}."
 
     def briefed(self, party: Conversation) -> str:
         """Say how the brief the trial's session sent `party` was told; raise where it was never told, or told otherwise than given once as its first turn: told twice, beside a hook too, it reads as `told` some other way."""
@@ -1092,9 +1178,12 @@ print(len(found))
                 "your words as its turns, answers into your inbox, stops at an "
                 "interrupt, outlives a restart of the host service, spawns a "
                 "side job whose report comes back to it, ending there, and "
-                "resumes it with a `send`, hands a concern over to one you "
-                "talk with directly, which outlives it, ends, resumes, and "
-                "passes to a terminal and back. A launch's setup "
+                "resumes it with a `send`, hands a concern over to one forked "
+                "from its conversation, which you talk with directly, which "
+                "outlives it and which your reply "
+                "restarts once it ended, ends, tells you of its side job's "
+                "worktree left, resumes, and passes to a terminal and back. A "
+                "launch's setup "
                 f"took {spelled(self.steps[0].took)}. Not tried here: the other "
                 "runtime, holds of hours, and an interactive terminal."
             )
@@ -1189,35 +1278,41 @@ def scratch_worktree(beside: Path, git: Git, name: str, commit: str) -> Path:
 
 
 class Scratch(Model):
-    """The trial's scratch worktree: where it is, the repository's common git directory, and git pinned there, which made it and removes it."""
+    """The trial's scratch worktree: where it is, the repository's common git directory and the tree a room mounts for it, and git pinned there, which made it."""
 
     path: Path
     repository: Path
+    tree: Path
+    """The tree every room of the repository mounts, which holds the scratch
+    worktree and each one its session spawned, and which rooms write."""
     git: Git
 
     def removed(self) -> None:
-        """Remove the worktree, whatever is in it, given as long as git removing a whole worktree is (`Git.whole`)."""
-        self.git.run(
-            "worktree", "remove", "--force", str(self.path), within=self.git.whole
-        )
+        """Remove the worktree, whatever is in it, by the host walking it from the tree without following a link (`hidden.removed`), then git's record of it, pruned: a room could link the path to another worktree, which git's own removal would follow."""
+        removed(self.tree, self.path)
+        self.git.run("worktree", "prune", within=self.git.whole)
 
     def unspawned(self, spawned: list[Register], say: Callable[[str], None]) -> None:
-        """Remove the worktree and the branch of each launch the trial's session spawned, whatever is in them, each under `tree/` of the repository and named for its branch (`made_root`), the removal given as long as git removing a whole worktree is (`Git.whole`); where git can't, say so, and go on."""
+        """Remove the worktree and the branch of each launch the trial's session spawned, whatever is in them, each under `tree/` of the repository and named for its branch (`made_root`): the worktree walked from the tree without following a link (`hidden.removed`), git's record of it pruned, and its branch deleted, by git pinned to the repository; where git can't, say so, and go on."""
         # A side job resumed holds the worktree it was spawned in: each once.
         for each in {launch.worktree: launch for launch in spawned}.values():
             if each.worktree.parent != self.repository / "tree":
                 say(f"{each.worktree} isn't one a spawn made, so it's left.")
                 continue
             try:
-                self.git.run(
-                    "worktree",
-                    "remove",
-                    "--force",
-                    str(each.worktree),
-                    within=self.git.whole,
+                removed(self.tree, each.worktree)
+                self.git.run("worktree", "prune", within=self.git.whole)
+                branch = self.git.run(
+                    "rev-parse",
+                    "--verify",
+                    "--quiet",
+                    "--end-of-options",
+                    f"refs/heads/{each.worktree.name}",
+                    ok=[0, 1],
                 )
-                self.git.run("branch", "-D", "--end-of-options", each.worktree.name)
-            except GitError as failed:
+                if branch.status == 0:
+                    self.git.run("branch", "-D", "--end-of-options", each.worktree.name)
+            except (GitError, OSError) as failed:
                 say(
                     f"{each.worktree}, which the trial's session spawned in, stays: {failed}"
                 )
@@ -1243,10 +1338,12 @@ def scratched(
     scratch = Scratch(
         path=scratch_worktree(root.parent, git, name, commit),
         repository=found.git,
+        tree=found.tree,
         git=git,
     )
     if repository(scratch.path, found.git).tree != found.tree:
-        scratch.removed()
+        # Outside what any room mounts, so no room wrote it: git's own removal.
+        git.run("worktree", "remove", "--force", str(scratch.path), within=git.whole)
         message = (
             f"a worktree at {scratch.path} would widen what a room of the "
             "repository mounts: run the trial from a worktree that has siblings, "

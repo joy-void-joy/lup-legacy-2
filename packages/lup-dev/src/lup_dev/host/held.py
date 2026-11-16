@@ -44,6 +44,7 @@ from lup_dev.host.protocol import (
 )
 from lup_dev.host.service import Handler
 from lup_dev.layout import HostPaths, Layout
+from lup_dev.stored import write_model
 
 
 class HeldLaunch(Model):
@@ -65,6 +66,11 @@ class HeldLaunch(Model):
     """The runtime's id for the session it starts, minted by the host where an
     agent spawned it, so its brief is addressed to it before it's up; none has
     the launcher mint one, or resume `resume`."""
+    forks: str | None = None
+    """The runtime's id for the session whose conversation it starts from, as
+    a fork: a new session, `session`, holding all that one said, where an agent
+    spawned it from their conversation (`SpawnTools.forked`). None starts one
+    afresh, or resumes `resume`."""
     repository: AbsolutePath | None = None
     """The repository's git directory as the host recorded the spawner's
     launch, where an agent spawned it: the launcher refuses a worktree whose
@@ -75,10 +81,14 @@ class HeldLaunch(Model):
 
 
 class SpawnedLauncher(Model):
-    """A launcher an agent's spawn started, as the service keeps it beside the launch's lock: what it was started with, and its process."""
+    """A launcher an agent's spawn started, as the service keeps it beside the launch's lock until it's seen to end: what it was started with, its process, and whether its session came up."""
 
     spec: HeldLaunch
     pid: int
+    up: bool = False
+    """Its launcher said its session is up (`CalledUp`): kept here, so a service
+    started after the spawn, as an approval starts one, knows whether the
+    spawner is to hear that it never came up once its launcher is gone."""
 
 
 class Spawn(Request, reads=False):
@@ -168,8 +178,17 @@ class Launchers(MutableModel, arbitrary_types_allowed=True):
     agent's spawn counts against the limit from its start, before its launch
     registers."""
 
-    def reaped(self) -> list[HeldLaunch]:
-        """Forget each launcher that has ended, its status collected so the OS frees it, and what it was waiting on; the sweep looks. Return what each whose session was never up was started with, so its spawner hears of it."""
+    def reaped(
+        self, layout: Layout, paths: HostPaths | None = None
+    ) -> list[HeldLaunch]:
+        """Forget each launcher that has ended, its status collected so the OS frees it, and what it was waiting on, and remove what's kept of each an agent's spawn started whose launcher is gone, this service's or a service's before it (`LaunchLayout.spawned`); the sweep looks. Return what each whose session was never up was started with, so its spawner hears of it.
+
+        This service's launchers are known up by what it heard; a service's
+        before it, by what's kept (`SpawnedLauncher.up`), since an approval
+        restarts the service between a spawn and its session's call-up, and the
+        launcher's end can come after either. A launcher kept is gone where its
+        process is, or names another launch (`launching`).
+        """
         ended = [launch for launch, each in self.started.items() if each.ended()]
         lost = [
             self.specs[launch]
@@ -186,12 +205,32 @@ class Launchers(MutableModel, arbitrary_types_allowed=True):
         self.waiting = {
             launch: up for launch, up in self.waiting.items() if launch not in ended
         }
-        return lost
+        for launch in ended:
+            layout.launch(launch).spawned.unlink(missing_ok=True)
+        looked = HostPaths() if paths is None else paths
+        gone = [
+            each
+            for each in kept_launchers(layout)
+            if each.spec.launch not in self.specs
+            and not launching(looked, each.pid, each.spec.launch)
+        ]
+        for each in gone:
+            layout.launch(each.spec.launch).spawned.unlink(missing_ok=True)
+        return [*lost, *(each.spec for each in gone if not each.up)]
+
+    def called(self, layout: Layout, launch: str) -> None:
+        """Keep that the launcher of `launch` said its session is up, beside what's kept of it where an agent's spawn started it (`SpawnedLauncher.up`), for a service started since to read; nothing where nothing's kept of it."""
+        kept = layout.launch(launch).spawned
+        try:
+            spawned = SpawnedLauncher.model_validate_json(kept.read_text())
+        except ValidationError, OSError:
+            return
+        write_model(kept, spawned.model_copy(update={"up": True}))
 
     def spawning(
         self, layout: Layout, paths: HostPaths | None = None
     ) -> list[HeldLaunch]:
-        """Return each launch an agent spawned whose launcher hasn't been seen to end: counted against the limits before its launch registers. Those this service started, and those a service before it started, kept beside their lock in `layout` while their launcher runs (`LaunchLayout.spawned`), by their process (`launching`); one kept whose launcher is gone is forgotten."""
+        """Return each launch an agent spawned whose launcher hasn't been seen to end: counted against the limits before its launch registers. Those this service started, and those a service before it started, kept beside their lock in `layout` while their launcher runs (`LaunchLayout.spawned`), by their process (`launching`); what's kept of one whose launcher is gone is left for `reaped`, which tells its spawner where it never came up."""
         mine = [
             spec
             for launch, spec in self.specs.items()
@@ -205,9 +244,6 @@ class Launchers(MutableModel, arbitrary_types_allowed=True):
             for each in kept_launchers(layout)
             if each.spec.launch not in self.specs
         ]
-        for each in kept:
-            if not launching(looked, each.pid, each.spec.launch):
-                layout.launch(each.spec.launch).spawned.unlink(missing_ok=True)
         return [
             *mine,
             *(
@@ -229,6 +265,17 @@ def kept_launchers(layout: Layout) -> list[SpawnedLauncher]:
                 continue
 
     return list(read())
+
+
+def never_up(layout: Layout, launch: str) -> bool:
+    """Say whether an agent's spawn started `launch`'s launcher and its session never came up, as what's kept of it says (`SpawnedLauncher.up`): its launcher keeps its log then, which its spawner is told names why (`SpawnTools.lost`)."""
+    try:
+        kept = SpawnedLauncher.model_validate_json(
+            layout.launch(launch).spawned.read_text()
+        )
+    except ValidationError, OSError:
+        return False
+    return not kept.up
 
 
 def launching(paths: HostPaths, pid: int, launch: str) -> bool:
@@ -290,7 +337,7 @@ class Spawning(Model, Handler[Spawn], arbitrary_types_allowed=True):
         self.launchers.specs = {**self.launchers.specs, launch: spec}
         if spec.spawner is not None:
             kept = SpawnedLauncher(spec=spec, pid=launcher.process.pid)
-            self.layout.launch(launch).spawned.write_text(kept.model_dump_json())
+            write_model(self.layout.launch(launch).spawned, kept)
         return Starting(launch=launch, pid=launcher.process.pid, log=log)
 
 
@@ -382,8 +429,9 @@ class Abandoning(Model, Handler[Abandon], arbitrary_types_allowed=True):
 
 
 class CallingUp(Model, Handler[CalledUp], arbitrary_types_allowed=True):
-    """Answers `CalledUp`: the spawn waiting on it answered, and the session given what waits for it."""
+    """Answers `CalledUp`: the spawn waiting on it answered, kept as up beside its lock where an agent spawned it, and the session given what waits for it."""
 
+    layout: Layout
     launchers: Launchers
     up: Callable[[CalledUp], Awaitable[None]] | None = None
     """Gives the session what waits for it as its first turn, which it wasn't
@@ -399,13 +447,14 @@ class CallingUp(Model, Handler[CalledUp], arbitrary_types_allowed=True):
 
     @override
     async def answer(self, request: CalledUp) -> Reply:
-        """Resolve what an await of the launch waits on, or will: a service started after the spawn, as an approval starts one, hears it before anyone awaits it again. Then give the session what waits."""
+        """Resolve what an await of the launch waits on, or will: a service started after the spawn, as an approval starts one, hears it before anyone awaits it again; and keep it up, for a service started after this one (`Launchers.called`). Then give the session what waits."""
         waiting = self.launchers.waiting.get(request.launch)
         if waiting is None:
             waiting = asyncio.get_running_loop().create_future()
             self.launchers.waiting = {**self.launchers.waiting, request.launch: waiting}
         if not waiting.done():
             waiting.set_result(request)
+        self.launchers.called(self.layout, request.launch)
         if self.up is None:
             return Done()
         try:

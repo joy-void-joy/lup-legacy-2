@@ -754,7 +754,7 @@ class LaunchLayout(Model):
 
     @property
     def spawned(self) -> Path:
-        """What an agent's spawn started the launch's launcher with, and its process: kept while the launcher runs, so a service started again counts it against the limits before its launch registers (`Launchers.spawning`)."""
+        """What an agent's spawn started the launch's launcher with, its process, and whether its session came up: kept until the service sees the launcher gone, so a service started again counts it against the limits before its launch registers (`Launchers.spawning`), and tells its spawner where it never came up (`Launchers.reaped`)."""
         return self.directory.with_name(f"{self.directory.name}.spawned.json")
 
     @property
@@ -1122,14 +1122,14 @@ class Layout(Model):
         """Say where launch `launch`'s own places are."""
         return LaunchLayout(directory=self.launches / launch)
 
-    def side_job(self, session: str) -> Path:
-        """Say where what a side job an agent spawned was started with is kept, by its session's id, which lup minted: what resumes it, its context kept, once it ended at its report and its spawner sends it more (`SpawnTools.resumed`)."""
-        return self.side_jobs / f"{session}.json"
+    def spawned_session(self, session: str) -> Path:
+        """Say where what a session an agent spawned was started with is kept, by its session's id, which lup minted: what resumes it, its context kept, once it ended, a side job at its report and a builder when the operator ended it, and something that would wake it running reaches it (`SpawnTools.restarted`)."""
+        return self.spawned_sessions / f"{session}.json"
 
     @property
-    def side_jobs(self) -> Path:
-        """Where what each side job was started with is kept, until its worktree is gone (`side_job`)."""
-        return self.launches / "side-jobs"
+    def spawned_sessions(self) -> Path:
+        """Where what each session an agent spawned was started with is kept (`spawned_session`)."""
+        return self.launches / "spawned-sessions"
 
     def writer(self, runtime: str, session: str) -> Path:
         """Say where the lock is that the one launch writing `runtime`'s session `session` holds while its runtime runs it, which the runtime itself doesn't refuse a second of (`docs/launch.md`, *A session held with no terminal*)."""

@@ -45,7 +45,7 @@ from lup_dev import commanding, conversions
 from lup_dev.accounts import AccountError, Accounts, Login, RuntimeLogin
 
 # lup: ignore("runtime-mention", why="the one place listing the adapters")
-from lup_dev.adapters import Adapter, claude, codex
+from lup_dev.adapters import Adapter, Holding, claude, codex
 from lup_dev.approval import approved, approved_branches
 from lup_dev.clipboard.desktop import Desktop
 from lup_dev.clipboard.protocol import routes as clipboard_routes
@@ -129,6 +129,7 @@ from lup_dev.host.held import (
     Spawning,
     Starting,
     launcher_command,
+    never_up,
 )
 from lup_dev.host.held import Ending as HeldEnding
 from lup_dev.host.held import Interrupting as HeldInterrupting
@@ -181,6 +182,7 @@ from lup_dev.inbox.bearings import RepositoryBearings
 from lup_dev.inbox.citations import plainly
 from lup_dev.inbox.delivery import (
     Delivery,
+    HoldAnswering,
     clocked,
     standing,
 )
@@ -282,7 +284,7 @@ from lup_dev.launch.session import (
     hooked,
     terminal_settings,
 )
-from lup_dev.launch.spawning import SpawnTools
+from lup_dev.launch.spawning import Forking, Respawns, SpawnTools
 from lup_dev.launch.trial import TerminalRun, Trial, scratched, taken_over_there
 from lup_dev.launch.trust import (
     Approving,
@@ -707,7 +709,7 @@ def held_routes(
         Route.to(Spawning(layout=layout, launchers=launchers, start=launcher_started)),
         Route.to(Awaiting(layout=layout, launchers=launchers)),
         Route.to(Abandoning(launchers=launchers)),
-        Route.to(CallingUp(launchers=launchers, up=up, say=typer.echo)),
+        Route.to(CallingUp(layout=layout, launchers=launchers, up=up, say=typer.echo)),
         Route.to(HeldInterrupting(holders=holders)),
         Route.to(HeldEnding(holders=holders)),
     ]
@@ -781,10 +783,7 @@ def host_serve(context: typer.Context) -> None:
         notices=Unsaid() if rehearsing else NotifySend(),
         clock=SystemClock(),
         say=typer.echo,
-        settle_hold=lambda change, repository, approved, said: hold_answered(
-            layout, change, repository, approved=approved, comment=said
-        ),
-        hold_unheard=lambda change: hold_unheard(layout, change),
+        hold_answering=HeldAnswers(layout=layout),
         queues={
             adapter.runtime.name(): adapter.queues
             for adapter in known.known
@@ -804,10 +803,10 @@ def host_serve(context: typer.Context) -> None:
     coming = Coming(delivery=delivery, layout=layout, say=typer.echo)
     delivery.starting = coming.started
     spawning = spawn_tools(delivery, layout, launchers, known)
-    delivery.resumer = spawning.resumed
+    delivery.respawning = Respawns(tools=spawning)
 
     async def reap() -> None:
-        for each in launchers.reaped():
+        for each in launchers.reaped(layout):
             await spawning.lost(each)
 
     sweeping = Sweeping(
@@ -820,6 +819,7 @@ def host_serve(context: typer.Context) -> None:
         reap=reap,
         rewake=delivery.rewoken,
         ended=partial(side_job_ended, holders, say=typer.echo),
+        left=spawning.left,
     )
     turns = Turns()
     trying = Trying(
@@ -1080,10 +1080,10 @@ def room_tools(
 def spawn_tools(
     delivery: Delivery, layout: Layout, launchers: Launchers, known: Adapters
 ) -> SpawnTools:
-    """Return the `spawn` tool as the service serves it: launchers started as `lup-dev spawn`'s are, among `launchers`; the launches served read from their records; a session's id minted by its runtime's adapter, where it has a held session; and a worktree started from the integration branch the declaration approved for its repository names."""
+    """Return the `spawn` tool as the service serves it: launchers started as `lup-dev spawn`'s are, among `launchers`; the launches served read from their records; a session's id minted, and a session forked, by its runtime's adapter, where it has a held session; and a worktree started from the integration branch the declaration approved for its repository names."""
 
-    def mint(runtime: str) -> str | None:
-        held = next(
+    def holding(runtime: str) -> Holding | None:
+        return next(
             (
                 each.holding
                 for each in known.known
@@ -1091,7 +1091,16 @@ def spawn_tools(
             ),
             None,
         )
+
+    def mint(runtime: str) -> str | None:
+        held = holding(runtime)
         return None if held is None else held.minted()
+
+    def forking(runtime: str) -> Forking | None:
+        held = holding(runtime)
+        if held is None or held.forking is None:
+            return None
+        return Forking(resumable=held.resumable)
 
     return SpawnTools(
         delivery=delivery,
@@ -1100,6 +1109,7 @@ def spawn_tools(
         launchers=launchers,
         served=lambda: recorded_launches(layout.host),
         mint=mint,
+        forking=forking,
         starting=lambda repository: approved_branches(layout, repository).integration,
     )
 
@@ -1277,6 +1287,24 @@ def heading(item: Item, paths: Sequence[Pathed] = ()) -> str:
         f"{cited(item.number)}, {what(item)} from {called(item.sender, paths)}{where} to "
         f"{recipient}, made {clocked(item.made)}, {standing(item)}:"
     )
+
+
+class HeldAnswers(Model, HoldAnswering):
+    """Where the operator's answers to held changes go on this machine: each hook's answer file under lup's state (`hold_answered`, `hold_unheard`)."""
+
+    layout: Layout
+
+    @override
+    def answered(
+        self, change: HeldChange, repository: Path, *, approved: bool, said: str
+    ) -> str | None:
+        return hold_answered(
+            self.layout, change, repository, approved=approved, comment=said
+        )
+
+    @override
+    def unheard(self, change: HeldChange) -> str | None:
+        return hold_unheard(self.layout, change)
 
 
 def hold_answered(
@@ -2408,7 +2436,8 @@ class Sweeping(MutableModel, Companion, arbitrary_types_allowed=True):
     giving it having failed (`Delivery.rewoken`); none gives nothing."""
     reap: Callable[[], Awaitable[None]] | None = None
     """Collects each held launch's launcher the service started that has
-    ended, so none is left a zombie, and tells the agent who spawned one whose
+    ended, so none is left a zombie, forgets each a service before it started
+    for an agent's spawn that's gone, and tells the agent who spawned one whose
     session never came up (`Launchers.reaped`, `SpawnTools.lost`); none
     collects none."""
     ended: Callable[[Register], Coroutine[None, None, None]] | None = None
@@ -2424,11 +2453,13 @@ class Sweeping(MutableModel, Companion, arbitrary_types_allowed=True):
     ending: dict[str, asyncio.Task[None]] = {}
     """Each side job whose spawner's launch the service doesn't serve, by
     its launch, while its launcher is asked to end it."""
-    forgetting: timedelta = timedelta(seconds=30)
-    """How long the look at side jobs' worktrees may take (`forgot`), before
-    the sweep goes on without it."""
-    looking: asyncio.Future[None] | None = None
-    """That look, while it runs."""
+    left: Callable[[], Awaitable[None]] | None = None
+    """Tells the operator once of each side job's worktree left once the launch
+    that spawned it is gone, and what it holds (`SpawnTools.left`); none tells
+    nothing."""
+    leaving: asyncio.Task[None] | None = None
+    """That look, while it runs: git reads refs a room writes, within its
+    limits, which the sweep doesn't wait on, and none starts beside it."""
 
     @override
     async def begin(self) -> None:
@@ -2440,6 +2471,8 @@ class Sweeping(MutableModel, Companion, arbitrary_types_allowed=True):
         self.stopping.set()
         if self.task is not None:
             await self.task
+        if self.leaving is not None:
+            self.leaving.cancel()
 
     async def sweeping(self) -> None:
         """Sweep every `every`, until the service stops."""
@@ -2468,60 +2501,25 @@ class Sweeping(MutableModel, Companion, arbitrary_types_allowed=True):
         if self.reap is not None:
             await self.reap()
         await self.orphans_ended()
-        await self.forgot()
+        self.looked_left()
         if self.rewake is not None:
             await self.rewake()
         self.woken()
 
-    async def forgot(self) -> None:
-        """Remove what each side job was started with whose worktree is gone (`forgotten`), in a thread, waiting `forgetting` at most: a worktree is a path a room writes, any part of which can be a link leading where a look waits. Past it, the sweep goes on, and no other look starts while that one runs, so it holds one thread at most."""
-        if self.looking is not None and not self.looking.done():
-            self.say(
-                "The look at what side jobs were started with still runs, so "
-                "none starts beside it."
-            )
+    def looked_left(self) -> None:
+        """Start the look at side jobs' worktrees left (`left`) apart, where none runs; where it fails, say why, with its traceback, and the next sweep starts it again."""
+        left = self.left
+        if left is None or (self.leaving is not None and not self.leaving.done()):
             return
-        looking = asyncio.ensure_future(asyncio.to_thread(self.forgotten))
-        self.looking = looking
-        await asyncio.wait([looking], timeout=self.forgetting.total_seconds())
-        if not looking.done():
-            self.say(
-                "The look at what side jobs were started with ran past "
-                f"{self.forgetting}: the sweep goes on without it."
-            )
 
-    def forgotten(self) -> None:
-        """Remove what each side job was started with where its worktree is gone, so nothing resumes it again (`Layout.side_job`, `SpawnTools.resumed`), or where it doesn't read, saying each; what can't be read or removed is said, and the next sweep looks again.
+        async def leaving() -> None:
+            try:
+                await left()
+            except Exception as failed:
+                told = "".join(traceback.format_exception(failed))
+                self.say(f"The look at side jobs' worktrees left failed:\n{told}")
 
-        Run off the event loop, for `forgetting` at most (`forgot`): the
-        worktrees are paths a room writes. One that's a link is taken for gone,
-        never followed.
-        """
-        try:
-            kept = sorted(self.layout.side_jobs.glob("*.json"))
-        except OSError as unread:
-            self.say(f"What side jobs were started with wasn't looked at: {unread}")
-            return
-        for each in kept:
-            try:
-                spec = HeldLaunch.model_validate_json(each.read_text())
-                gone = not spec.worktree.is_dir(follow_symlinks=False)
-            except ValueError, OSError:
-                gone = True
-                spec = None
-            if not gone:
-                continue
-            try:
-                each.unlink(missing_ok=True)
-            except OSError as failed:
-                self.say(f"{each} wasn't removed: {failed}")
-                continue
-            why = (
-                "it didn't read"
-                if spec is None
-                else f"its worktree, {spec.worktree}, is gone"
-            )
-            self.say(f"What side job {each.stem} was started with is removed: {why}.")
+        self.leaving = asyncio.create_task(leaving())
 
     async def orphans_ended(self) -> None:
         """Ask the launcher of each side job whose spawner's launch the service doesn't serve to end it, in the background, as that launch's end does (`Launches.close`): one that registered after its spawner ended, or whose spawner's end a restart cut short, would run on for nobody, its reports reaching someone gone. Where the launches can't be listed, say so; the next sweep looks again."""
@@ -2827,6 +2825,8 @@ def launched(
             model=model_named([*arguments, *([] if held is None else held.arguments)]),
             session=None if held is None else naming.session,
             behind=behind(trusting),
+            profile=choice.profile.name,
+            account=choice.account,
         )
         session, arguments = naming.session, naming.arguments
         hiding = RoomSecrets.of(
@@ -2944,9 +2944,8 @@ def launched(
                         ended(launcher, launch)
                         for line in [*environments.end(), *hiding.end()]:
                             launcher.say(line)
-                        if held is not None:
+                        if held is not None and not never_up(launcher.layout, launch):
                             own.log.unlink(missing_ok=True)
-                            own.spawned.unlink(missing_ok=True)
         finally:
             own.lock.unlink(missing_ok=True)
             if writing is not None and writer is not None:
@@ -3016,7 +3015,7 @@ def model_named(arguments: list[str]) -> str | None:
 
 
 def orphaned(launches: list[Register]) -> list[Register]:
-    """Return each held side job among `launches` whose spawner's launch isn't among them: what ends with its spawner (`Launches.side_jobs`)."""
+    """Return each held side job among `launches` whose spawner's launch isn't among them: what ends with its spawner (`Launches.side_jobs`); not one the operator's words restarted, which runs to its next report (`Spawner.restarted`)."""
     served = {each.launch: each for each in launches}
     return [
         each
@@ -3024,6 +3023,7 @@ def orphaned(launches: list[Register]) -> list[Register]:
         if each.held
         and each.spawner is not None
         and each.spawner.concern is None
+        and not each.spawner.restarted
         and each.spawner.launch not in served
     ]
 
@@ -3047,26 +3047,42 @@ def still_running(podman: Podman, container: str) -> bool:
 def named_session(
     adapter: Adapter, arguments: list[str], held: HeldLaunch | None
 ) -> NamedSession:
-    """Return the runtime's id for the session a launch runs, where it's known before its room starts, and the runtime's arguments: a held launch's, named up front, new or resumed, before the operator's own; a terminal's, the one its arguments resume by its id, they unchanged.
+    """Return the runtime's id for the session a launch runs, where it's known before its room starts, and the runtime's arguments: a held launch's, named up front, new, resumed or forked from another, before the operator's own; a terminal's, the one its arguments resume by its id, they unchanged.
 
-    Raise `LaunchError` where a held launch resumes an id that can't be one of
-    the runtime's.
+    Raise `LaunchError` where a held launch resumes or forks an id that can't be
+    one of the runtime's, or forks one where the runtime forks none.
     """
     holding = adapter.holding
     if held is None or holding is None:
         return NamedSession(
             session=an_id(adapter, adapter.resumed(arguments)), arguments=arguments
         )
-    fresh = held.session or holding.minted()
+    named = held.resume if held.forks is None else held.forks
     try:
-        session = fresh if held.resume is None else holding.normal(held.resume)
-        naming = (
-            holding.fresh(session) if held.resume is None else holding.resuming(session)
-        )
+        naming = held_named(holding, held, held.session or holding.minted())
     except ValueError as unnamed:
-        message = f"`{held.resume}` can't be a session of {adapter.runtime.name()}'s"
+        message = f"`{named}` can't be a session of {adapter.runtime.name()}'s"
         raise LaunchError(message) from unnamed
-    return NamedSession(session=session, arguments=[*naming, *held.arguments])
+    if naming is None:
+        message = f"{adapter.runtime.name()} forks no session it holds"
+        raise LaunchError(message)
+    return naming.model_copy(update={"arguments": [*naming.arguments, *held.arguments]})
+
+
+def held_named(holding: Holding, held: HeldLaunch, fresh: str) -> NamedSession | None:
+    """Return the session a held launch runs and the runtime's arguments naming it, lup's alone: `fresh` forked from `held.forks`, `held.resume` resumed, or else `fresh` started; none where it forks one and the runtime forks none. Raise `ValueError` for an id that can't be the runtime's."""
+    if held.forks is not None:
+        if holding.forking is None:
+            return None
+        session = holding.normal(fresh)
+        return NamedSession(
+            session=session,
+            arguments=holding.forking(holding.normal(held.forks), session),
+        )
+    if held.resume is not None:
+        session = holding.normal(held.resume)
+        return NamedSession(session=session, arguments=holding.resuming(session))
+    return NamedSession(session=fresh, arguments=holding.fresh(fresh))
 
 
 def an_id(adapter: Adapter, resumed: str | None) -> str | None:
@@ -3557,7 +3573,9 @@ def spawn_trial(
     Run it yourself, in your own terminal, in a worktree of a repository you
     approved. In a scratch worktree beside this one, it starts a held session,
     sends it your words and sees its answer, interrupts a long turn, restarts
-    the host service and sees the session survive, ends it, resumes it held,
+    the host service and sees the session survive, has it spawn a side job and
+    a builder, ends it, restarts the builder with a reply, sees you told of the
+    side job's worktree left, resumes it held,
     has a terminal launch take it over, and resumes it held again; then it
     removes the scratch worktree and files what passed, what failed and what
     that means (`lup_dev.launch.trial`). It takes a few minutes, a few short

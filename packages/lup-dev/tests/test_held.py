@@ -37,6 +37,7 @@ from lup_dev.host.held import (
     Starting,
     launcher_command,
     launching,
+    never_up,
 )
 from lup_dev.host.holders import HeldEnd, HeldInterrupt, Holders
 from lup_dev.host.protocol import (
@@ -55,6 +56,7 @@ from lup_dev.host.protocol import (
 from lup_dev.host.service import Dispatcher, Program, Route, unix_server
 from lup_dev.host.watch import Changes
 from lup_dev.inbox.protocol import (
+    AnswerItem,
     Exchange,
     Exchanged,
     FileReport,
@@ -77,6 +79,7 @@ from lup_dev.launch.trial import (
     taking_over,
 )
 from lup_dev.layout import HostLayout, HostPaths, Layout
+from lup_dev.stored import write_model
 from lup_ledger.parties import Conversation, Operator, Party
 
 if TYPE_CHECKING:
@@ -120,7 +123,7 @@ def test_a_spawn_starts_its_launcher_and_its_await_answers_once_it_calls_its_ses
         ).answer(asking(tmp_path))
         assert isinstance(starting, Starting)
         # Called up before anyone awaits it, as a launcher may be.
-        await CallingUp(launchers=launchers).answer(
+        await CallingUp(layout=layout, launchers=launchers).answer(
             CalledUp(launch=starting.launch, name="dev", session="s-1")
         )
         awaited = await Awaiting(
@@ -151,7 +154,7 @@ def test_a_spawn_starts_its_launcher_and_its_await_answers_once_it_calls_its_ses
     launcher = launchers.started[spec.launch]
     launcher.process.kill()
     launcher.process.wait()
-    launchers.reaped()
+    launchers.reaped(layout)
     assert launchers.started == {}
     assert launchers.waiting == {}
 
@@ -210,7 +213,7 @@ def test_a_launcher_an_agent_s_spawn_started_is_counted_until_it_ends_and_one_ne
                 launch=launch, runtime="claude", worktree=tmp_path, spawner=spawner
             )
         )
-        await CallingUp(launchers=launchers).answer(
+        await CallingUp(layout=layout, launchers=launchers).answer(
             CalledUp(launch=up.launch, name="two", session="s-2")
         )
         counted = launchers.spawning(layout)
@@ -219,7 +222,7 @@ def test_a_launcher_an_agent_s_spawn_started_is_counted_until_it_ends_and_one_ne
             launcher = launchers.started[each.launch]
             launcher.process.kill()
             launcher.process.wait()
-        return counted, launchers.reaped()
+        return counted, launchers.reaped(layout)
 
     counted, lost = asyncio.run(spawned())
 
@@ -247,7 +250,7 @@ def test_a_spawn_abandoned_before_its_session_is_up_ends_its_launcher_and_one_up
         await Abandoning(launchers=launchers).answer(
             Abandon(launch=first.launch, pid=first.pid)
         )
-        await CallingUp(launchers=launchers).answer(
+        await CallingUp(layout=layout, launchers=launchers).answer(
             CalledUp(launch=second.launch, name="dev", session="s-1")
         )
         try:
@@ -559,10 +562,26 @@ class Played(HostClient):
                     if any(self.reporting):
                         self.item(side, Operator(), "LIME")
                     self.item(self.conversation, Operator(), "LIME")
+                elif "`trial elsewhere`" in text:
+                    [spawner] = [each for each in self.served if each.spawner is None]
+                    elsewhere = held("trial-elsewhere").model_copy(
+                        update={
+                            "name": "trial-elsewhere",
+                            "repository": Path("/y/.git"),
+                            "worktree": Path("/y/.git/tree/trial-elsewhere"),
+                            "session": "s-trial-elsewhere",
+                            "spawner": Spawner(
+                                launch=spawner.launch, conversation=self.conversation
+                            ),
+                        }
+                    )
+                    self.served.append(elsewhere)
+                    self.fleeting.append(elsewhere.launch)
+                    self.item(self.conversation, Operator(), "QUINCE")
                 elif "`trial builder`" in text:
                     builder = self.spawned("trial-builder", 5)
                     self.item(self.conversation, Operator(), "SENT")
-                    self.item(builder, Operator(), "FIG")
+                    self.item(builder, Operator(), "PAPAYA")
                 elif "time.sleep" in text or "wait_inbox" in text:
                     self.calling.append(True)
                 elif answer is not None:
@@ -600,12 +619,42 @@ class Played(HostClient):
                 return reply.model_validate(
                     Shown(item=self.items[number - 1]).model_dump()
                 )
+            case AnswerItem(number=number, comment=comment):
+                # A reply to a spawned session that ended restarts it, and it
+                # answers with what it knew.
+                sender = self.items[number - 1].sender
+                assert isinstance(sender, Conversation)
+                replied = self.item(Operator(), sender, comment)
+                [launch] = [
+                    name for name, party in self.sessions.items() if party == sender
+                ]
+                [ended] = [
+                    each
+                    for each in [held(launch)]
+                    if launch not in [served.launch for served in self.served]
+                ]
+                again = ended.model_copy(
+                    update={"launch": f"{launch}-2", "session": sender.session}
+                )
+                self.served.append(again)
+                self.item(sender, Operator(), "PAPAYA")
+                return reply.model_validate(Shown(item=replied).model_dump())
             case _:
                 return reply.model_validate(Done().model_dump())
 
     @override
     def held(self, request: Request) -> Outstanding:
         self.asked.append(request)
+        side = self.sessions.get("trial-side-job")
+        if isinstance(request, End) and request.launch.startswith("h") and side:
+            # The sweep tells of the side job's worktree its spawner left.
+            self.item(
+                side,
+                Operator(),
+                "lup: `trial-side-job`'s worktree stays, though the launch that "
+                "spawned it has ended.",
+                ending=False,
+            )
         if isinstance(request, End):
             # A side job ends with the launch that spawned it.
             self.served[:] = [
@@ -708,6 +757,8 @@ def test_the_trial_tries_each_step_and_files_what_it_saw_under_the_session(
         ("hands a concern over", True),
         ("ends", True),
         ("a builder outlives its spawner", True),
+        ("your reply restarts the builder", True),
+        ("a side job's worktree left is told", True),
         ("resumes held", True),
         ("a terminal takes it over", True),
         ("back to held", True),
@@ -715,7 +766,7 @@ def test_the_trial_tries_each_step_and_files_what_it_saw_under_the_session(
     report = written(host.items[number - 1])
     assert report.startswith(
         f"**Spawn's trial**, `lup-dev spawn trial`, in {tmp_path / 'spawn-trial-1'}: "
-        "14 of 14 steps passed."
+        "16 of 16 steps passed."
     )
     assert "**What it means:** a session lup holds with no terminal works" in report
     assert host.items[number - 1].sender == host.conversation
@@ -745,7 +796,7 @@ def test_a_trial_whose_session_never_starts_says_so_and_files_it_anyway(
 
     assert [(each.name, each.passed) for each in steps] == [("held", False)]
     report = written(host.items[number - 1])
-    assert "0 of 14 steps passed." in report
+    assert "0 of 16 steps passed." in report
     assert (
         "- **held**, failed in 0 s: the launcher of launch h1 ended before its "
         "session was up"
@@ -755,8 +806,8 @@ def test_a_trial_whose_session_never_starts_says_so_and_files_it_anyway(
         "Not tried, after that: answers, the room can't type as the operator, "
         "a room's command is stopped in time, interrupts, survives a restart, "
         "spawns a side job, resumes its side job, hands a concern over, ends, a "
-        "builder outlives its spawner, resumes held, a terminal takes it over, back "
-        "to held."
+        "builder outlives its spawner, your reply restarts the builder, a side job's "
+        "worktree left is told, resumes held, a terminal takes it over, back to held."
     ) in report
     sender = host.items[number - 1].sender
     assert isinstance(sender, Conversation)
@@ -1132,7 +1183,7 @@ def test_a_service_started_since_awaits_a_launcher_it_didn_t_start_by_its_proces
     awaiting = Awaiting(layout=layout, launchers=launchers, paths=paths, pause=yielded)
 
     async def awaited() -> tuple[Reply, Reply]:
-        await CallingUp(launchers=launchers).answer(
+        await CallingUp(layout=layout, launchers=launchers).answer(
             CalledUp(launch="a1", name="dev", session="s-1")
         )
         up = await awaiting.answer(AwaitHeld(launch="a1", pid=41))
@@ -1220,12 +1271,13 @@ def test_the_trial_removes_the_worktree_and_branch_of_each_launch_its_session_sp
         commit,
     )
     said: list[str] = []
-    scratch = Scratch(path=main, repository=repository, git=Git.pinned(repository))
+    scratch = Scratch(
+        path=main, repository=repository, tree=tmp_path, git=Git.pinned(repository)
+    )
     outside = held("elsewhere").model_copy(update={"worktree": tmp_path / "elsewhere"})
 
-    scratch.unspawned(
-        [held("side").model_copy(update={"worktree": made}), outside], said.append
-    )
+    side = held("side").model_copy(update={"worktree": made, "repository": repository})
+    scratch.unspawned([side, outside], said.append)
 
     assert not made.exists()
     assert (
@@ -1253,10 +1305,10 @@ def test_a_brief_told_twice_fails_its_spawn_step(
     )
 
 
-def test_a_launcher_a_service_before_started_for_a_spawn_is_counted_while_it_runs(
+def test_a_launcher_a_service_before_started_for_a_spawn_is_counted_while_it_runs_and_its_spawner_told_where_it_never_came_up(
     layout: Layout, tmp_path: Path
 ) -> None:
-    """Kept beside its lock: a service started since knows it by its process, and forgets it once that's gone."""
+    """Kept beside its lock: a service started since, as an approval starts one, knows it by its process while it runs; once that's gone it forgets it, handing back for its spawner to hear of the one whose session never came up, as the service before it said, and the one it was told came up itself."""
     spawner = Spawner(
         launch="s0",
         conversation=Conversation(
@@ -1265,12 +1317,12 @@ def test_a_launcher_a_service_before_started_for_a_spawn_is_counted_while_it_run
     )
     layout.launches.mkdir(parents=True)
 
-    def kept(launch: str, pid: int) -> None:
+    def kept(launch: str, pid: int, *, up: bool = False) -> None:
         spec = HeldLaunch(
             launch=launch, runtime="claude", worktree=tmp_path, spawner=spawner
         )
         layout.launch(launch).spawned.write_text(
-            SpawnedLauncher(spec=spec, pid=pid).model_dump_json()
+            SpawnedLauncher(spec=spec, pid=pid, up=up).model_dump_json()
         )
 
     # A program that keeps the launch's id among its arguments, as the
@@ -1282,24 +1334,94 @@ def test_a_launcher_a_service_before_started_for_a_spawn_is_counted_while_it_run
         "a1",
         log=tmp_path / "a1.log",
     )
-    gone = detached("true", "b1", log=tmp_path / "b1.log")
-    gone.process.wait()
+    gone = [
+        detached("true", launch, log=tmp_path / f"{launch}.log")
+        for launch in ["b1", "c1", "d1"]
+    ]
+    for each in gone:
+        each.process.wait()
     cmdline = Path("/proc") / str(running.process.pid) / "cmdline"
     for _ in range(600):
         if b"a1" in cmdline.read_bytes():
             break
         time.sleep(0.01)
+    never, up, heard = gone
     kept("a1", running.process.pid)
-    kept("b1", gone.process.pid)
+    kept("b1", never.process.pid)
+    kept("c1", up.process.pid, up=True)
+    kept("d1", heard.process.pid)
+    launchers = Launchers()
+
+    async def called() -> None:
+        await CallingUp(layout=layout, launchers=launchers).answer(
+            CalledUp(launch="d1", name="four", session="s-4")
+        )
+
+    asyncio.run(called())
     try:
-        counted = Launchers().spawning(layout)
+        counted = launchers.spawning(layout)
+        lost = launchers.reaped(layout)
     finally:
         running.process.kill()
         running.process.wait()
 
     assert [each.launch for each in counted] == ["a1"]
+    assert [each.launch for each in lost] == ["b1"]
     assert layout.launch("a1").spawned.exists()
-    assert not layout.launch("b1").spawned.exists()
+    for launch in ["b1", "c1", "d1"]:
+        assert not layout.launch(launch).spawned.exists()
+
+
+def test_a_spawn_s_launcher_keeps_its_log_where_its_session_never_came_up(
+    layout: Layout, tmp_path: Path
+) -> None:
+    """Its spawner is told the log names why: one up, or the operator's own, has no such reader."""
+    layout.launches.mkdir(parents=True)
+    spec = HeldLaunch(launch="a1", runtime="claude", worktree=tmp_path)
+    write_model(layout.launch("a1").spawned, SpawnedLauncher(spec=spec, pid=1))
+    write_model(
+        layout.launch("b1").spawned,
+        SpawnedLauncher(spec=spec.model_copy(update={"launch": "b1"}), pid=1, up=True),
+    )
+
+    assert never_up(layout, "a1")
+    assert not never_up(layout, "b1")
+    assert not never_up(layout, "c1")
+
+
+def test_the_trial_s_cleanup_follows_no_link_a_room_planted_at_a_spawned_worktree(
+    tmp_path: Path, shell: Shell
+) -> None:
+    """A room writes `tree/`, so the path of a worktree its session spawned can be a link to another worktree, which git's own removal would find by its real path and remove."""
+    repository, main, commit = repository_with_a_worktree(tmp_path, shell)
+    precious = tmp_path / "elsewhere"
+    shell.git(
+        tmp_path,
+        "--git-dir",
+        str(repository),
+        "worktree",
+        "add",
+        "-q",
+        "--no-checkout",
+        "-b",
+        "kept",
+        str(precious),
+        commit,
+    )
+    (precious / "precious.txt").write_text("keep me\n")
+    made = repository / "tree" / "trial-side-job"
+    made.parent.mkdir(exist_ok=True)
+    made.symlink_to(precious)
+    said: list[str] = []
+    scratch = Scratch(
+        path=main, repository=repository, tree=tmp_path, git=Git.pinned(repository)
+    )
+    side = held("side").model_copy(update={"worktree": made, "repository": repository})
+
+    scratch.unspawned([side], said.append)
+
+    assert (precious / "precious.txt").read_text() == "keep me\n"
+    assert not made.is_symlink()
 
 
 def test_a_side_job_whose_spawner_s_launch_isn_t_served_is_orphaned_and_a_builder_isn_t() -> (
@@ -1318,8 +1440,12 @@ def test_a_side_job_whose_spawner_s_launch_isn_t_served_is_orphaned_and_a_builde
     kept = held("kept").model_copy(
         update={"spawner": spawner.model_copy(update={"launch": "here"})}
     )
+    # Restarted by the operator's words, it answers them: it runs to its report.
+    answering = held("answering").model_copy(
+        update={"spawner": spawner.model_copy(update={"restarted": True})}
+    )
 
-    assert cli.orphaned([side, built, kept, held("here")]) == [side]
+    assert cli.orphaned([side, built, kept, answering, held("here")]) == [side]
 
 
 def test_the_sweep_ends_each_side_job_whose_spawner_s_launch_isn_t_served(
@@ -1361,87 +1487,45 @@ def test_the_sweep_ends_each_side_job_whose_spawner_s_launch_isn_t_served(
     ) in said
 
 
-def test_the_sweep_removes_what_a_side_job_was_started_with_once_its_worktree_is_gone(
+def test_the_sweep_looks_at_side_jobs_worktrees_left_apart_one_look_at_a_time_and_says_one_failing(
     layout: Layout, tmp_path: Path, clock: FakeClock
 ) -> None:
-    """Nothing resumes a side job whose worktree is gone, as `land` removes a landed branch's; one a room made a link is taken for gone, never followed."""
-    kept, gone, linked = tmp_path / "kept", tmp_path / "gone", tmp_path / "linked"
-    kept.mkdir()
-    linked.symlink_to(kept)
-    for session, worktree in [("c1", kept), ("c2", gone), ("c4", linked)]:
-        record = layout.side_job(session)
-        record.parent.mkdir(parents=True, exist_ok=True)
-        record.write_text(
-            HeldLaunch(
-                launch=f"l-{session}",
-                runtime="claude",
-                worktree=worktree,
-                session=session,
-            ).model_dump_json()
+    """git reads refs a room writes, within its limits, and any part of a worktree's path can be a link a room made, leading where a look waits: the sweep doesn't wait on it, and starts no other while one runs."""
+    host, _ = played(tmp_path, clock)
+    tidies: list[int] = []
+    said: list[str] = []
+
+    async def swept() -> bool:
+        released = asyncio.Event()
+
+        async def left() -> None:
+            tidies.append(1)
+            await released.wait()
+            message = "the room's git left a lock behind"
+            raise OSError(message)
+
+        sweeping = cli.Sweeping(
+            layout=layout,
+            host=host,
+            podman=Podman(),
+            say=said.append,
+            running=list,
+            left=left,
         )
-    layout.side_job("c3").write_text("{")
-    said: list[str] = []
-    host, _ = played(tmp_path, clock)
-    sweeping = cli.Sweeping(
-        layout=layout, host=host, podman=Podman(), say=said.append, running=list
-    )
+        sweeping.looked_left()
+        await asyncio.sleep(0)
+        sweeping.looked_left()
+        running = sweeping.leaving is not None and not sweeping.leaving.done()
+        released.set()
+        if sweeping.leaving is not None:
+            await sweeping.leaving
+        return running
 
-    sweeping.forgotten()
-
-    assert sorted(each.stem for each in layout.side_jobs.glob("*.json")) == ["c1"]
-    assert said == [
-        f"What side job c2 was started with is removed: its worktree, {gone}, is gone.",
-        "What side job c3 was started with is removed: it didn't read.",
-        f"What side job c4 was started with is removed: its worktree, {linked}, is gone.",
-    ]
-
-
-def test_the_sweep_s_look_at_side_jobs_worktrees_holds_it_no_longer_than_its_limit(
-    layout: Layout, tmp_path: Path, clock: FakeClock, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Any part of a worktree's path can be a link a room made, leading where a look waits: the sweep goes on past `forgetting`, and starts no other look while that one runs."""
-    host, _ = played(tmp_path, clock)
-    released = threading.Event()
-    looks: list[int] = []
-
-    def waiting(self: cli.Sweeping) -> None:
-        looks.append(1)
-        released.wait(20)
-
-    monkeypatch.setattr(cli.Sweeping, "forgotten", waiting)
-    said: list[str] = []
-    sweeping = cli.Sweeping(
-        layout=layout,
-        host=host,
-        podman=Podman(),
-        say=said.append,
-        running=list,
-        forgetting=timedelta(seconds=0.5),
-    )
-
-    async def swept() -> float:
-        began = time.monotonic()
-        try:
-            await sweeping.forgot()
-            await sweeping.forgot()
-        finally:
-            released.set()
-        return time.monotonic() - began
-
-    took = asyncio.run(swept())
-
-    assert took < 5
-    assert looks == [1]
-    assert said == [
-        (
-            "The look at what side jobs were started with ran past 0:00:00.500000: "
-            "the sweep goes on without it."
-        ),
-        (
-            "The look at what side jobs were started with still runs, so none starts "
-            "beside it."
-        ),
-    ]
+    assert asyncio.run(swept())
+    assert tidies == [1]
+    [failed] = said
+    assert failed.startswith("The look at side jobs' worktrees left failed:\n")
+    assert failed.endswith("OSError: the room's git left a lock behind\n")
 
 
 def test_side_jobs_the_sweep_ends_hold_none_of_the_threads_the_judge_s_hooks_wait_on(
