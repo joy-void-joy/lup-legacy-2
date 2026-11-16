@@ -29,7 +29,7 @@ handlers as one that refuses, or keeps what it would do in the state:
 - a held change answered, the same ways: the host writes the answer into the
   store of the hold's worktree, runs git in that worktree and logs the verdict,
   for the hook waiting on it to put the files back or keep them
-  (`Delivery.settle_hold`, `lup_dev.policy.holds.answer`). Here the answer is
+  (`Delivery.hold_answering`, `lup_dev.policy.holds.answer`). Here the answer is
   kept in memory (`Withheld.holds`), nothing written;
 - an item for a conversation (`AnswerItem`, `SendItem`, `SendDraft`, an
   approval's comment, a landing's answer): the host releases their waiting
@@ -101,7 +101,7 @@ from lup_dev.host.timings import routes as timings_routes
 from lup_dev.host.views import ModuleActions, ModuleViews
 from lup_dev.host.watch import Changes
 from lup_dev.host.workers import Acting, LaunchJudge, RepositoryAsking, Viewing
-from lup_dev.inbox.delivery import Delivery
+from lup_dev.inbox.delivery import Delivery, HoldAnswering
 from lup_dev.inbox.exchanges import Exchanges
 from lup_dev.inbox.marks import MarkStore, StoredMarks
 from lup_dev.inbox.marks import routes as marks_routes
@@ -205,9 +205,28 @@ class Withheld(MutableModel, Notices):
         self.notices = [*self.notices, f"{summary}\n{body}"]
 
     def hold(self, change: HeldChange, *, approved: bool, comment: str) -> None:
-        """Keep the answer to `change`, where the host writes it for its hook (`Delivery.settle_hold`)."""
+        """Keep the answer to `change`, where the host writes it for its hook (`HoldAnswering.answered`)."""
         answered = HoldAnswered(change=change, approved=approved, comment=comment)
         self.holds = [*self.holds, answered]
+
+
+class Withholding(Model, HoldAnswering, arbitrary_types_allowed=True):
+    """Where the demo's answers to held changes go: kept by `Withheld`, nothing told the conversation that made them."""
+
+    withheld: Withheld
+
+    @override
+    def answered(
+        self, change: HeldChange, repository: Path, *, approved: bool, said: str
+    ) -> str | None:
+        del repository
+        self.withheld.hold(change, approved=approved, comment=said)
+        return None
+
+    @override
+    def unheard(self, change: HeldChange) -> str | None:
+        del change
+        return None
 
 
 class ItemsExchanged(Model, Exchanges, arbitrary_types_allowed=True):
@@ -464,9 +483,7 @@ def handled(
         notices=withheld,
         clock=clock,
         say=say,
-        settle_hold=lambda change, approved, said: withheld.hold(
-            change, approved=approved, comment=said
-        ),
+        hold_answering=Withholding(withheld=withheld),
         landing=waits.holding,
     )
     launches = Launches(

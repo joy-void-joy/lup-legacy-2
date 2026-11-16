@@ -51,8 +51,9 @@ import shutil
 import traceback
 from abc import ABC, abstractmethod
 from collections import Counter
-from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine
+from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Iterator
 from contextlib import AsyncExitStack, asynccontextmanager
+from datetime import timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Self, override
 
@@ -71,7 +72,7 @@ from lup.events import (
     TurnStarted,
     WorktreeAsked,
 )
-from lup.programs import ProgramMissingError, Ran, awaited
+from lup.programs import ProgramMissingError, ProgramOverdueError, Ran, awaited
 from lup.rooms.engine import ContainerError, Podman
 from lup.tools import speaking
 from lup.tools.serving import Answer, Outbox, serve
@@ -90,7 +91,7 @@ from lup_dev.host.courier import (
     Telling,
     Waker,
 )
-from lup_dev.host.holders import Holders
+from lup_dev.host.holders import HeldEnd, Holders
 from lup_dev.host.homes import kept
 from lup_dev.host.names import (
     Names,
@@ -166,13 +167,62 @@ class Answerer(ABC):
 
 
 class Program(Model):
-    """One program the service runs: `gh` for a launch, or git for its room; its command, what goes on its input, and where it runs."""
+    """One program the service runs: `gh` for a launch, git for its room, or a command in the room; its command, what goes on its input, where it runs, and the longest it may."""
 
     command: list[str]
     payload: str
     """What goes on its standard input: a body for `gh`, or what git reads."""
     directory: Path | None = None
     """Where it runs; none for the service's own directory."""
+    within: timedelta = timedelta(seconds=30)
+    """The longest it may run, past which it's killed, with whatever it
+    started. git reading a repository's refs takes milliseconds, and a room can
+    make a ref a FIFO in which it waits for good (`docs/credentials.md`,
+    *Running git on the host*); what crosses the network, or runs the room's
+    gate, is given longer where it's made, saying why."""
+    kept: int | None = None
+    """The most of each of its outputs kept, in bytes, their end, the rest
+    dropped as it runs (`awaited`): for a command whose program a room chose,
+    which could print without end. None keeps them whole, where all of it is
+    needed, as `gh`'s answer is."""
+
+
+async def side_job_ended(
+    holders: Holders, launch: Register, say: Callable[[str], None]
+) -> None:
+    """Ask the launcher of `launch`, a side job whose spawner's launch ended, to end its session, on the event loop, holding no thread while it ends; where it can't be reached, refuses or doesn't answer in time (`Holders.ending`), say so, for the operator to end it."""
+    try:
+        await holders.asked(launch.launch, HeldEnd())
+    except HostError as failed:
+        say(
+            f"{launch.launch}: a side job whose spawner's launch ended wasn't "
+            f"ended with it, `lup-dev spawn end {launch.name}` ends it: {failed}"
+        )
+        return
+    say(f"{launch.launch}: ended with the launch that spawned it")
+
+
+def records(layout: HostLayout) -> list[Path]:
+    """Return where each launch the service serves is recorded, in their ids' order: its record is written as it's served and removed as it ends (`Launches.open`, `close`)."""
+    # Each launch's conversations are kept beside its record, and aren't a record.
+    return [
+        each
+        for each in sorted(layout.launches.glob("*.json"))
+        if each != layout.conversations(each.stem.removesuffix(".conversations"))
+    ]
+
+
+def recorded_launches(layout: HostLayout) -> list[Register]:
+    """Return each launch the service serves as its record stands, one that doesn't read as a launch's left out."""
+
+    def read() -> Iterator[Register]:
+        for record in records(layout):
+            try:
+                yield Register.model_validate_json(record.read_text())
+            except ValidationError, OSError:
+                continue
+
+    return list(read())
 
 
 async def executed(program: Program) -> Ran:
@@ -180,9 +230,10 @@ async def executed(program: Program) -> Ran:
 
     Awaited (`lup.programs`, `awaited`), so it holds no thread for as long as it
     runs, `gh` waiting on GitHub's answer or git on a room's push
-    (`remote/protocol.py`), and it's killed where the wait is cancelled. One
-    that can't be started ends with status 127, as a shell says it, why on its
-    standard error.
+    (`remote/protocol.py`), and it's killed, with what it started, past its
+    `within` or where the wait is cancelled. One that can't be started ends
+    with status 127, as a shell says it, and one killed past its `within` with
+    status 124, as `timeout` says it, why on its standard error.
     """
     name, *arguments = program.command
     try:
@@ -192,9 +243,13 @@ async def executed(program: Program) -> Ran:
             cwd=program.directory,
             stdin=program.payload,
             checked=False,
+            kept=program.kept,
+            within=program.within,
         )
     except ProgramMissingError as missing:
         return Ran(command=program.command, status=127, error=str(missing).encode())
+    except ProgramOverdueError as late:
+        return Ran(command=program.command, status=124, error=str(late).encode())
 
 
 class Handler[R: Request](ABC):
@@ -604,14 +659,15 @@ def introduction(tools: list[ToolSpec]) -> str:
     type's name doesn't fix the tools (a project's agent of the same name
     replaces a built-in one), so they're told some types go without lup's.
 
-    >>> from lup.tools.speaking import friction, how_it_felt
-    >>> print(introduction([friction.spec(), how_it_felt.spec()]))
+    >>> from lup.tools.speaking import concern, friction, how_it_felt
+    >>> print(introduction([concern.spec(), friction.spec(), how_it_felt.spec()]))
     lup, the environment you work in, serves you these tools, as it does your session's main conversation. Your tool search finds each by its name, with its full description. Some subagent types are given only their own tools, without lup's: where your tool search finds none of these, you're one of them.
     <BLANKLINE>
+    - `concern`: Say what's worth keeping an eye on, and carry on.
     - `friction`: Say what got in your way, and carry on.
     - `how_it_felt`: Tell your caller how it is for you.
     <BLANKLINE>
-    `friction` and `how_it_felt` reach the operator directly, whatever your parent passes on.
+    `concern`, `friction` and `how_it_felt` reach the operator directly, whatever your parent passes on.
     """
     opening = (
         "lup, the environment you work in, serves you these tools, as it does "
@@ -621,7 +677,8 @@ def introduction(tools: list[ToolSpec]) -> str:
         "these, you're one of them."
     )
     direct = (
-        f"`{speaking.friction.name}` and `{speaking.how_it_felt.name}` reach the "
+        f"`{speaking.concern.name}`, `{speaking.friction.name}` and "
+        f"`{speaking.how_it_felt.name}` reach the "
         "operator directly, whatever your parent passes on."
     )
     return "\n".join([opening, "", *summaries(tools), "", direct])
@@ -844,6 +901,8 @@ class Launches(MutableModel, arbitrary_types_allowed=True):
     """Told once each hook is answered, and each room's request."""
     clock: Clock
     """When each conversation's activity began."""
+    ended: Callable[[Register], Awaitable[None]] | None = None
+    """Told each launch as it ends (`HostService.ended`); none tells nobody."""
     served: dict[str, Served] = {}
     opening: dict[str, Register] = {}
     """The launches whose registration is under way, by id, each named."""
@@ -1240,6 +1299,28 @@ class Launches(MutableModel, arbitrary_types_allowed=True):
                 f"is: {unread}"
             )
             return Spoken(answer=await self.judgement(request, payload, writer))
+        if request.session is not None and heard.session != request.session:
+            # A held launch runs the one session its launcher named: a hook
+            # naming another is a process of its room's speaking as another
+            # session of the repository, its spawner's among them.
+            why = (
+                f"launch `{request.launch}` holds the session {request.session}, "
+                f"so lup answers no hook of the session {heard.session} there"
+            )
+            return self.refused(request, payload, why)
+        runner = self.runner_of(request, heard.session)
+        if runner is not None:
+            # A process of this room speaking as a session another launch runs,
+            # a held one the operator talks with directly among them: told
+            # nothing of theirs, and heard as none of them. Where it's the
+            # operator's own session, resumed here after a room named it, its
+            # writes are refused, as where the judge can't answer.
+            why = (
+                f"the session {heard.session} is run by launch `{runner}`, so lup "
+                f"answers its hooks there, not in launch `{request.launch}`: end "
+                "that launch, or work in it"
+            )
+            return self.refused(request, payload, why)
         if request.home is not None:
             kept(
                 self.layout,
@@ -1434,7 +1515,10 @@ class Launches(MutableModel, arbitrary_types_allowed=True):
 
         A hook of its the judge is still answering is marked ended
         (`judgement`), so a hold its call waits on gives up as an interrupted
-        call's. The directory goes with whatever the room left in it.
+        call's. The directory goes with whatever the room left in it. Each
+        side job its session spawned through lup ends with it, as a native
+        subagent ends with its session, its launcher asked to end it; and
+        whoever spawned it hears it ended (`ended`).
         """
         served = self.served.pop(launch, None)
         if served is None:
@@ -1443,6 +1527,10 @@ class Launches(MutableModel, arbitrary_types_allowed=True):
         served.ending.set()
         if self.holders is not None:
             self.holders.closed(launch)
+        for each in self.side_jobs(launch):
+            self.background(self.side_job_ended(each))
+        if self.ended is not None:
+            await self.ended(served.launch)
         for server in served.servers:
             await closed(server)
         if Stopped.named() in served.offered.events:
@@ -1454,6 +1542,51 @@ class Launches(MutableModel, arbitrary_types_allowed=True):
         self.layout.conversations(launch).unlink(missing_ok=True)
         shutil.rmtree(self.layout.launch(launch).directory)
         self.say(f"{launch}: ended")
+
+    def refused(self, request: Register, payload: str, why: str) -> Spoken:
+        """Answer a hook naming a session this launch doesn't run, `why` saying whose it is, as one its judge couldn't answer (`Answerer.unanswered`): a file's write refused, the operator warned of any other call, nothing told, and none of it kept as that session's."""
+        self.say(f"{request.launch}: a hook was refused: {why}")
+        return Spoken(answer=self.answerer.unanswered(request.runtime, payload, why))
+
+    def runner_of(self, request: Register, session: str) -> str | None:
+        """Return the launch other than `request`, of its repository and runtime, that runs `session`: a held one, whose launcher named it its session, or a terminal one whose latest hook named it, as `lup-dev launch` reads which runs one (`run_elsewhere`, `cli.py`); none where none does, or where `request` is held on it, which no other launch takes from it.
+
+        A terminal launch's session is the one its latest hook named, not its
+        first: a clear or a resume moves it to another in the same process, as
+        a hook of its room's could say just as well, so it's bound to none.
+        """
+        if request.session == session:
+            return None
+        return next(
+            (
+                each.launch.launch
+                for each in self.served.values()
+                if each.launch.launch != request.launch
+                and each.launch.repository == request.repository
+                and each.launch.runtime == request.runtime
+                and (each.launch.session or each.conversations.session) == session
+            ),
+            None,
+        )
+
+    def side_jobs(self, launch: str) -> list[Register]:
+        """Return each launch served whose session `launch`'s spawned through lup as a side job, held by its launcher: what ends with it; not one the operator's words restarted, which runs to its next report (`Spawner.restarted`)."""
+        holders = self.holders
+        return [
+            each.launch
+            for each in self.served.values()
+            if each.launch.spawner is not None
+            and each.launch.spawner.launch == launch
+            and each.launch.spawner.concern is None
+            and not each.launch.spawner.restarted
+            and holders is not None
+            and holders.holds(each.launch.launch)
+        ]
+
+    async def side_job_ended(self, launch: Register) -> None:
+        """Ask the launcher of `launch`, a side job whose spawner's launch ended, to end its session (`side_job_ended`)."""
+        if self.holders is not None:
+            await side_job_ended(self.holders, launch, self.say)
 
     def spawning(
         self,
@@ -1673,14 +1806,7 @@ class Launches(MutableModel, arbitrary_types_allowed=True):
         A record that doesn't read as a launch's, or that this service can't serve,
         is said and left in place.
         """
-        # Each launch's conversations are kept beside its record, and aren't a record.
-        records = [
-            each
-            for each in sorted(self.layout.launches.glob("*.json"))
-            if each
-            != self.layout.conversations(each.stem.removesuffix(".conversations"))
-        ]
-        for record in records:
+        for record in records(self.layout):
             try:
                 request = Register.model_validate_json(record.read_text())
                 await self.open(request)
@@ -2036,6 +2162,10 @@ class HostService(Model, arbitrary_types_allowed=True):
     the inbox's store, given the same (`cli.py`)."""
     clock: Clock = Field(default_factory=SystemClock)
     """When each conversation's activity began; a test gives its own."""
+    ended: Callable[[Register], Awaitable[None]] | None = None
+    """Told each launch the service stops serving as it ends: the inbox tells
+    the agent who spawned it through lup (`Delivery.closed`, which `cli.py`
+    gives); none tells nobody."""
     companions: list[Companion] = []
     """The programs it runs beside it, the dashboard's server among them
     (`host/dashboard.py`): each begun once it listens, a failure said, and ended
@@ -2120,6 +2250,7 @@ class HostService(Model, arbitrary_types_allowed=True):
             podman=self.podman,
             changes=self.changes,
             clock=self.clock,
+            ended=self.ended,
         )
         stopped = asyncio.Event()
         own = [

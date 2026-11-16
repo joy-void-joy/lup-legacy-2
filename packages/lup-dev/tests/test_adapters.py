@@ -2086,6 +2086,15 @@ def test_claude_is_held_under_a_session_it_names_and_codex_isn_t_yet() -> None:
     assert holding.resuming(session) == ["--resume", session]
     with pytest.raises(ValueError, match="hexadecimal UUID"):
         holding.resuming("--dangerously-skip-permissions")
+    assert holding.forking is not None
+    forked = holding.minted()
+    assert holding.forking(forked, session) == [
+        "--resume",
+        forked,
+        "--fork-session",
+        "--session-id",
+        session,
+    ]
     # An idle held session's turn reads as a pushed one's prompt does.
     assert holding.prompt("Hi.", "t1") == (
         '<channel source="lup" wake="t1">\nHi.\n</channel>'
@@ -2641,6 +2650,19 @@ def test_each_runtime_hears_whether_a_sessions_own_conversation_starts_empty(
     assert codex.heard(from_codex).fresh is fresh
     subagent = json.dumps({**json.loads(from_claude), "agent_id": "a1"})
     assert not claude.heard(subagent).fresh
+
+
+@pytest.mark.parametrize("source", ["startup", "clear", "resume", "compact", "fork"])
+def test_each_runtime_hears_whether_a_sessions_own_conversation_is_another_s_forked(
+    source: str,
+) -> None:
+    from_claude = payload(Path("/w"), "SessionStart", source=source)
+    started = json.loads((CAPTURED / "1-session-start.json").read_text())
+    from_codex = json.dumps({**started, "source": source})
+    assert claude.heard(from_claude).forked is (source == "fork")
+    assert codex.heard(from_codex).forked is (source == "fork")
+    subagent = json.dumps({**json.loads(from_claude), "agent_id": "a1"})
+    assert not claude.heard(subagent).forked
 
 
 # Quiet on each runtime: `quiet` runs as a repository's process runs it, with

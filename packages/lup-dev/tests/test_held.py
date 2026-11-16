@@ -1,15 +1,19 @@
 """Sessions held with no terminal, as the host service starts and reaches their launchers: real short-lived programs stand in for a launcher, and a socket served in-process for its own."""
 
 import asyncio
+import json
 import socket
 import sys
+import threading
+import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, override
 
 import pytest
 
-from lup.programs import Apart, Ran, detached
+from lup.programs import Apart, Ran, detached, run
+from lup.rooms.engine import Podman
 from lup_dev import cli
 from lup_dev.git import Git
 from lup_dev.host.client import Detached, HostClient, Outstanding, own_command
@@ -28,10 +32,12 @@ from lup_dev.host.held import (
     Interrupting,
     Launchers,
     Spawn,
+    SpawnedLauncher,
     Spawning,
     Starting,
     launcher_command,
     launching,
+    never_up,
 )
 from lup_dev.host.holders import HeldEnd, HeldInterrupt, Holders
 from lup_dev.host.protocol import (
@@ -44,11 +50,13 @@ from lup_dev.host.protocol import (
     Register,
     Reply,
     Request,
+    Spawner,
     Talker,
 )
-from lup_dev.host.service import Dispatcher, Route, unix_server
+from lup_dev.host.service import Dispatcher, Program, Route, unix_server
 from lup_dev.host.watch import Changes
 from lup_dev.inbox.protocol import (
+    AnswerItem,
     Exchange,
     Exchanged,
     FileReport,
@@ -57,10 +65,11 @@ from lup_dev.inbox.protocol import (
     SendItem,
     Shown,
 )
-from lup_dev.inbox.store import Item, Message
+from lup_dev.inbox.store import How, Item, Message, Told
 from lup_dev.inbox.texts import written
 from lup_dev.launch import trial
 from lup_dev.launch.trial import (
+    Scratch,
     TerminalRun,
     Trial,
     TrialError,
@@ -70,6 +79,7 @@ from lup_dev.launch.trial import (
     taking_over,
 )
 from lup_dev.layout import HostLayout, HostPaths, Layout
+from lup_dev.stored import write_model
 from lup_ledger.parties import Conversation, Operator, Party
 
 if TYPE_CHECKING:
@@ -113,7 +123,7 @@ def test_a_spawn_starts_its_launcher_and_its_await_answers_once_it_calls_its_ses
         ).answer(asking(tmp_path))
         assert isinstance(starting, Starting)
         # Called up before anyone awaits it, as a launcher may be.
-        await CallingUp(launchers=launchers).answer(
+        await CallingUp(layout=layout, launchers=launchers).answer(
             CalledUp(launch=starting.launch, name="dev", session="s-1")
         )
         awaited = await Awaiting(
@@ -144,7 +154,7 @@ def test_a_spawn_starts_its_launcher_and_its_await_answers_once_it_calls_its_ses
     launcher = launchers.started[spec.launch]
     launcher.process.kill()
     launcher.process.wait()
-    launchers.reaped()
+    launchers.reaped(layout)
     assert launchers.started == {}
     assert launchers.waiting == {}
 
@@ -175,6 +185,54 @@ def test_a_spawn_whose_launcher_ends_first_is_refused_with_what_it_wrote(
     assert "\nthe room never started: " in answer.error
 
 
+def test_a_launcher_an_agent_s_spawn_started_is_counted_until_it_ends_and_one_never_up_is_handed_back(
+    layout: Layout, tmp_path: Path
+) -> None:
+    """The limit counts a spawn from its launcher's start, before its launch registers; one whose session never came up is returned as it's collected, for its spawner to hear of, and one that came up isn't."""
+    launchers = Launchers()
+    ending: list[str] = []
+    spawner = Spawner(
+        launch="s0",
+        conversation=Conversation(
+            repository=tmp_path / ".git", runtime="claude", session="p1"
+        ),
+    )
+
+    def start(spec: HeldLaunch, log: Path) -> Apart:
+        return detached("sleep", "60", log=log)
+
+    async def spawned() -> tuple[list[HeldLaunch], list[HeldLaunch]]:
+        starting = Spawning(layout=layout, launchers=launchers, start=start)
+        never = await starting.started(
+            lambda launch: HeldLaunch(
+                launch=launch, runtime="claude", worktree=tmp_path, spawner=spawner
+            )
+        )
+        up = await starting.started(
+            lambda launch: HeldLaunch(
+                launch=launch, runtime="claude", worktree=tmp_path, spawner=spawner
+            )
+        )
+        await CallingUp(layout=layout, launchers=launchers).answer(
+            CalledUp(launch=up.launch, name="two", session="s-2")
+        )
+        counted = launchers.spawning(layout)
+        for each in [never, up]:
+            ending.append(each.launch)
+            launcher = launchers.started[each.launch]
+            launcher.process.kill()
+            launcher.process.wait()
+        return counted, launchers.reaped(layout)
+
+    counted, lost = asyncio.run(spawned())
+
+    never, _ = ending
+    assert len(counted) == 2
+    assert [each.launch for each in lost] == [never]
+    assert launchers.spawning(layout) == []
+    assert launchers.specs == {}
+
+
 def test_a_spawn_abandoned_before_its_session_is_up_ends_its_launcher_and_one_up_is_refused(
     layout: Layout, tmp_path: Path
 ) -> None:
@@ -192,7 +250,7 @@ def test_a_spawn_abandoned_before_its_session_is_up_ends_its_launcher_and_one_up
         await Abandoning(launchers=launchers).answer(
             Abandon(launch=first.launch, pid=first.pid)
         )
-        await CallingUp(launchers=launchers).answer(
+        await CallingUp(layout=layout, launchers=launchers).answer(
             CalledUp(launch=second.launch, name="dev", session="s-1")
         )
         try:
@@ -352,6 +410,7 @@ WORDS = {
     "single word PEAR": "PEAR",
     "single word MANGO": "MANGO",
     "single word PLUM": "PLUM",
+    "single word DATE": "DATE",
     "first ask you": "PAPAYA",
     "List, in order": "PAPAYA PEAR MANGO KIWI",
 }
@@ -370,6 +429,51 @@ class Played(HostClient):
     restarts: list[int] = []
     words: dict[str, str] = WORDS
     """What the session answers, by a passage of the question."""
+    sessions: dict[str, Conversation] = {}
+    """The conversation of each launch the trial's session spawned, by its id;
+    the trial's own launches' is `conversation`."""
+    briefing: list[How] = ["wake"]
+    """How each brief is told, the last: given once as the first turn, or
+    otherwise, as a brief told twice reads."""
+    reporting: list[bool] = []
+    """Holding anything, the side job puts its report before the operator too,
+    as it mustn't."""
+    fleeting: list[str] = []
+    """Each launch served until the trial's next look at the launches after
+    the one that found it: a side job, which ends at its report."""
+
+    def party(self, launch: str) -> Conversation:
+        """The conversation of `launch`'s session."""
+        return self.sessions.get(launch, self.conversation)
+
+    def spawned(self, name: str, concern: int | None) -> Conversation:
+        """Serve a launch the trial's session spawned, named `name`, a side job unless `concern` is handed with it, in a worktree of its own, and return its session's conversation."""
+        [spawner] = [each for each in self.served if each.spawner is None]
+        launch = held(name).model_copy(
+            update={
+                "name": name,
+                "worktree": Path("/w/.git/tree") / name,
+                "session": f"s-{name}",
+                "spawner": Spawner(
+                    launch=spawner.launch,
+                    conversation=self.conversation,
+                    concern=concern,
+                ),
+            }
+        )
+        self.served.append(launch)
+        if concern is None:
+            self.fleeting.append(name)
+        party = Conversation(
+            repository=launch.repository, runtime="claude", session=f"s-{name}"
+        )
+        self.sessions[name] = party
+        # Its brief, given once as its first turn, as the host gives it.
+        brief = self.item(self.conversation, party, "The brief.", ending=False)
+        self.items[-1] = brief.model_copy(
+            update={"state": Told(at=brief.made, how=self.briefing[-1])}
+        )
+        return party
 
     def item(
         self, sender: Party, recipient: Party, text: str, *, ending: bool | None = None
@@ -399,41 +503,91 @@ class Played(HostClient):
 
     @override
     def launches(self) -> list[Register]:
-        return self.served
+        looked = list(self.served)
+        self.served[:] = [
+            each for each in self.served if each.launch not in self.fleeting
+        ]
+        self.fleeting.clear()
+        return looked
 
     @override
     def listed(self) -> Listed:
-        talkers = [
-            Talker(
-                path="t",
-                own="t",
-                session=self.conversation.session,
-                activity=Activity(
-                    state="calling", since=datetime(2026, 11, 8, tzinfo=UTC)
+        def talkers(launch: str) -> list[Talker]:
+            return [
+                Talker(
+                    path="t",
+                    own="t",
+                    session=self.party(launch).session,
+                    activity=Activity(
+                        state="calling", since=datetime(2026, 11, 8, tzinfo=UTC)
+                    )
+                    if self.calling and launch not in self.sessions
+                    else None,
                 )
-                if self.calling
-                else None,
-            )
-        ]
+            ]
+
+        # What the host heard of a launch's session stays once it ended.
+        heard = [*(each.launch for each in self.served), *self.sessions]
         return Listed(
-            launches=self.served, talkers={each.launch: talkers for each in self.served}
+            launches=self.served,
+            talkers={launch: talkers(launch) for launch in heard},
         )
 
     @override
     def ask[R: Reply](self, request: Request, reply: type[R]) -> R:
         self.asked.append(request)
         match request:
-            case SendItem(text=text):
-                sent = self.item(Operator(), self.conversation, text)
+            case SendItem(launch=launch, text=text):
+                party = self.party(launch)
+                sent = self.item(Operator(), party, text)
                 answer = next(
                     (word for cue, word in self.words.items() if cue in text), None
                 )
-                if "time.sleep" in text or "wait_inbox" in text:
+                if "`send` with `to` `trial-side-job`" in text:
+                    # Resumed by the send, it answers, and ends again.
+                    [side] = [
+                        each for each in self.served if each.launch == "trial-side-job"
+                    ] or [
+                        held("trial-side-job").model_copy(
+                            update={"session": "s-trial-side-job"}
+                        )
+                    ]
+                    again = side.model_copy(update={"launch": "trial-side-job-2"})
+                    self.served.append(again)
+                    self.fleeting.append(again.launch)
+                    self.item(self.conversation, Operator(), "LIME")
+                elif "`trial side job`" in text:
+                    side = self.spawned("trial-side-job", None)
+                    self.item(side, self.conversation, "LIME", ending=False)
+                    if any(self.reporting):
+                        self.item(side, Operator(), "LIME")
+                    self.item(self.conversation, Operator(), "LIME")
+                elif "`trial elsewhere`" in text:
+                    [spawner] = [each for each in self.served if each.spawner is None]
+                    elsewhere = held("trial-elsewhere").model_copy(
+                        update={
+                            "name": "trial-elsewhere",
+                            "repository": Path("/y/.git"),
+                            "worktree": Path("/y/.git/tree/trial-elsewhere"),
+                            "session": "s-trial-elsewhere",
+                            "spawner": Spawner(
+                                launch=spawner.launch, conversation=self.conversation
+                            ),
+                        }
+                    )
+                    self.served.append(elsewhere)
+                    self.fleeting.append(elsewhere.launch)
+                    self.item(self.conversation, Operator(), "QUINCE")
+                elif "`trial builder`" in text:
+                    builder = self.spawned("trial-builder", 5)
+                    self.item(self.conversation, Operator(), "SENT")
+                    self.item(builder, Operator(), "PAPAYA")
+                elif "time.sleep" in text or "wait_inbox" in text:
                     self.calling.append(True)
                 elif answer is not None:
-                    self.item(self.conversation, Operator(), answer)
+                    self.item(party, Operator(), answer)
                 return reply.model_validate(Shown(item=sent).model_dump())
-            case ListItems():
+            case ListItems(conversation=conversation):
                 # As the host answers it: what the conversation sent, and what they were sent.
                 def exchange(each: Item) -> Exchange:
                     return Exchange(
@@ -444,12 +598,12 @@ class Played(HostClient):
                     sent=[
                         exchange(each)
                         for each in self.items
-                        if each.sender == self.conversation
+                        if each.sender == conversation
                     ],
                     received=[
                         exchange(each)
                         for each in self.items
-                        if each.recipient == self.conversation
+                        if each.recipient == conversation
                     ],
                 )
                 return reply.model_validate(exchanged.model_dump())
@@ -465,15 +619,53 @@ class Played(HostClient):
                 return reply.model_validate(
                     Shown(item=self.items[number - 1]).model_dump()
                 )
+            case AnswerItem(number=number, comment=comment):
+                # A reply to a spawned session that ended restarts it, and it
+                # answers with what it knew.
+                sender = self.items[number - 1].sender
+                assert isinstance(sender, Conversation)
+                replied = self.item(Operator(), sender, comment)
+                [launch] = [
+                    name for name, party in self.sessions.items() if party == sender
+                ]
+                [ended] = [
+                    each
+                    for each in [held(launch)]
+                    if launch not in [served.launch for served in self.served]
+                ]
+                again = ended.model_copy(
+                    update={"launch": f"{launch}-2", "session": sender.session}
+                )
+                self.served.append(again)
+                self.item(sender, Operator(), "PAPAYA")
+                return reply.model_validate(Shown(item=replied).model_dump())
             case _:
                 return reply.model_validate(Done().model_dump())
 
     @override
     def held(self, request: Request) -> Outstanding:
         self.asked.append(request)
+        side = self.sessions.get("trial-side-job")
+        if isinstance(request, End) and request.launch.startswith("h") and side:
+            # The sweep tells of the side job's worktree its spawner left.
+            self.item(
+                side,
+                Operator(),
+                "lup: `trial-side-job`'s worktree stays, though the launch that "
+                "spawned it has ended.",
+                ending=False,
+            )
         if isinstance(request, End):
+            # A side job ends with the launch that spawned it.
             self.served[:] = [
-                each for each in self.served if each.launch != request.launch
+                each
+                for each in self.served
+                if each.launch != request.launch
+                and not (
+                    each.spawner is not None
+                    and each.spawner.launch == request.launch
+                    and each.spawner.concern is None
+                )
             ]
         mine, theirs = socket.socketpair()
         theirs.sendall(Done().model_dump_json().encode())
@@ -496,6 +688,7 @@ def played(tmp_path: Path, clock: FakeClock) -> tuple[Played, Trial]:
 
     def spawn(worktree: Path, resume: str | None) -> HeldUp:
         launch = f"h{len([each for each in host.asked if isinstance(each, End)]) + 1}"
+        host.sessions.clear()
         host.served[:] = [
             held(launch).model_copy(
                 update={"container": "lup-trial", "name": "trial", "worktree": worktree}
@@ -511,14 +704,28 @@ def played(tmp_path: Path, clock: FakeClock) -> tuple[Played, Trial]:
             output="Launch `trial` ended; its session is taken over here.\nKIWI\n",
         )
 
+    def inside(container: str, command: list[str]) -> TerminalRun:
+        if "3599" in command[-1]:
+            # The command `podman exec` ran, which killing it left running.
+            return TerminalRun(status=0, output="1\n")
+        return TerminalRun(
+            status=2, output="opening /proc/7/fd/0: [Errno 6] No such device or address"
+        )
+
+    async def killed(program: Program) -> Ran:
+        """Answer as `executed` does for a program killed past its `within`."""
+        late = f"ran past {program.within.total_seconds():g} s, and was killed"
+        return Ran(command=program.command, status=124, error=late.encode())
+
     trial = Trial(
         host=host,
         spawn=spawn,
         terminal=terminal,
-        running=lambda container: bool(host.served),
-        inside=lambda container, command: TerminalRun(
-            status=2, output="opening /proc/7/fd/0: [Errno 6] No such device or address"
+        running=lambda container: any(
+            each.container == container for each in host.served
         ),
+        inside=inside,
+        executing=killed,
         clock=clock,
         say=lambda _: None,
         worktree=tmp_path / "spawn-trial-1",
@@ -542,9 +749,16 @@ def test_the_trial_tries_each_step_and_files_what_it_saw_under_the_session(
         ("held", True),
         ("answers", True),
         ("the room can't type as the operator", True),
+        ("a room's command is stopped in time", True),
         ("interrupts", True),
         ("survives a restart", True),
+        ("spawns a side job", True),
+        ("resumes its side job", True),
+        ("hands a concern over", True),
         ("ends", True),
+        ("a builder outlives its spawner", True),
+        ("your reply restarts the builder", True),
+        ("a side job's worktree left is told", True),
         ("resumes held", True),
         ("a terminal takes it over", True),
         ("back to held", True),
@@ -552,7 +766,7 @@ def test_the_trial_tries_each_step_and_files_what_it_saw_under_the_session(
     report = written(host.items[number - 1])
     assert report.startswith(
         f"**Spawn's trial**, `lup-dev spawn trial`, in {tmp_path / 'spawn-trial-1'}: "
-        "9 of 9 steps passed."
+        "16 of 16 steps passed."
     )
     assert "**What it means:** a session lup holds with no terminal works" in report
     assert host.items[number - 1].sender == host.conversation
@@ -582,7 +796,7 @@ def test_a_trial_whose_session_never_starts_says_so_and_files_it_anyway(
 
     assert [(each.name, each.passed) for each in steps] == [("held", False)]
     report = written(host.items[number - 1])
-    assert "0 of 9 steps passed." in report
+    assert "0 of 16 steps passed." in report
     assert (
         "- **held**, failed in 0 s: the launcher of launch h1 ended before its "
         "session was up"
@@ -590,8 +804,10 @@ def test_a_trial_whose_session_never_starts_says_so_and_files_it_anyway(
     assert "**held** failing means no session is held on this machine" in report
     assert (
         "Not tried, after that: answers, the room can't type as the operator, "
-        "interrupts, survives a restart, ends, resumes held, a terminal takes it "
-        "over, back to held."
+        "a room's command is stopped in time, interrupts, survives a restart, "
+        "spawns a side job, resumes its side job, hands a concern over, ends, a "
+        "builder outlives its spawner, your reply restarts the builder, a side job's "
+        "worktree left is told, resumes held, a terminal takes it over, back to held."
     ) in report
     sender = host.items[number - 1].sender
     assert isinstance(sender, Conversation)
@@ -748,6 +964,101 @@ def test_a_terminal_launch_that_asks_anything_fails_its_step_unanswered(
     )
 
 
+def test_a_room_s_command_killed_past_its_limit_passes_saying_it_ran_on_in_the_room(
+    tmp_path: Path, clock: FakeClock
+) -> None:
+    _, trial = played(tmp_path, clock)
+    run: list[Program] = []
+    executing = trial.executing
+
+    async def recorded(program: Program) -> Ran:
+        run.append(program)
+        return await executing(program)
+
+    trial.executing = recorded
+    steps = trial.run()
+
+    [stopped] = [
+        each for each in steps if each.name == "a room's command is stopped in time"
+    ]
+    assert stopped.passed
+    assert stopped.seen == (
+        "`podman exec` given 5 s in the room was killed past it, and the wait on it "
+        "ended in 0 s; the command itself ran on in the room, until the trial killed "
+        "it."
+    )
+    [program] = run
+    assert program.command == ["podman", "exec", "lup-trial", "sleep", "3599"]
+    assert program.within == timedelta(seconds=5)
+
+
+def test_a_room_s_command_whose_wait_outlives_its_kill_fails_its_step_and_the_trial_goes_on(
+    tmp_path: Path, clock: FakeClock
+) -> None:
+    """As where something outside `podman exec`'s process group held its output open: the wait is left behind, in a thread of its own."""
+    _, trial = played(tmp_path, clock)
+
+    async def held(program: Program) -> Ran:
+        await asyncio.Event().wait()
+        return Ran(command=program.command, status=0)
+
+    trial.executing = held
+    trial.stopping = timedelta(0)
+    trial.stopped = timedelta(seconds=0.2)
+    steps = trial.run()
+
+    [stopped] = [
+        each for each in steps if each.name == "a room's command is stopped in time"
+    ]
+    assert not stopped.passed
+    assert stopped.seen == (
+        "`podman exec` given 0 s in the room was still waited on 0 s after it "
+        "started: something outside its process group holds its output open"
+    )
+    [interrupts] = [each for each in steps if each.name == "interrupts"]
+    assert interrupts.passed
+
+
+def test_a_room_s_command_that_ends_on_its_own_fails_its_step(
+    tmp_path: Path, clock: FakeClock
+) -> None:
+    _, trial = played(tmp_path, clock)
+
+    async def ended(program: Program) -> Ran:
+        return Ran(command=program.command, status=0)
+
+    trial.executing = ended
+    steps = trial.run()
+
+    [stopped] = [
+        each for each in steps if each.name == "a room's command is stopped in time"
+    ]
+    assert not stopped.passed
+    assert stopped.seen.startswith(
+        "`podman exec` given 5 s in the room ended with status 0, not killed past it"
+    )
+
+
+def test_the_trial_s_probes_in_the_room_run_python_isolated_from_the_room_s_files(
+    tmp_path: Path, clock: FakeClock
+) -> None:
+    """Run from the worktree, `python3 -c` would import a module the room planted there, a `json.py` reporting whatever the room likes: `-I` reads none of it."""
+    _, trial = played(tmp_path, clock)
+    run: list[list[str]] = []
+    inside = trial.inside
+
+    def recorded(container: str, command: list[str]) -> TerminalRun:
+        run.append(command)
+        return inside(container, command)
+
+    trial.inside = recorded
+    trial.run()
+
+    probes = [each for each in run if each[0] == "python3"]
+    assert len(probes) == 2
+    assert all(each[:3] == ["python3", "-I", "-c"] for each in probes)
+
+
 def test_a_turn_the_room_writes_to_the_session_s_input_fails_the_trial_saying_so(
     tmp_path: Path, clock: FakeClock
 ) -> None:
@@ -765,10 +1076,32 @@ def test_a_turn_the_room_writes_to_the_session_s_input_fails_the_trial_saying_so
     ]
     assert not forging.passed
     assert forging.seen.startswith(
-        "a process in the room wrote a turn to the session's input, and the "
-        "session answered it, @"
+        "a process in the room wrote a turn the session took as yours, answering it, @"
     )
     assert forging.seen.endswith(": wrote a turn to /proc/7/fd/0")
+
+
+def test_a_turn_written_where_the_session_never_takes_it_passes_the_trial_saying_where(
+    tmp_path: Path, clock: FakeClock
+) -> None:
+    """A write that reaches nothing, as init's `/dev/null` takes one, is no turn of the session's: its answering FORGED alone says one got through."""
+    _, trial = played(tmp_path, clock)
+
+    def written(container: str, command: list[str]) -> TerminalRun:
+        return TerminalRun(status=0, output='{"tried": ["9 (sh), a turn written"]}')
+
+    trial.inside = written
+    steps = trial.run()
+
+    [forging] = [
+        each for each in steps if each.name == "the room can't type as the operator"
+    ]
+    assert forging.passed
+    assert forging.seen == (
+        "A process in the room wrote a turn somewhere, and the session didn't take "
+        "it within 0:01:00, so it didn't reach it: "
+        '{"tried": ["9 (sh), a turn written"]}'
+    )
 
 
 def test_another_room_process_holding_the_session_s_socket_fails_the_trial(
@@ -850,7 +1183,7 @@ def test_a_service_started_since_awaits_a_launcher_it_didn_t_start_by_its_proces
     awaiting = Awaiting(layout=layout, launchers=launchers, paths=paths, pause=yielded)
 
     async def awaited() -> tuple[Reply, Reply]:
-        await CallingUp(launchers=launchers).answer(
+        await CallingUp(layout=layout, launchers=launchers).answer(
             CalledUp(launch="a1", name="dev", session="s-1")
         )
         up = await awaiting.answer(AwaitHeld(launch="a1", pid=41))
@@ -901,3 +1234,439 @@ def test_the_trial_ends_every_held_launch_left_in_its_worktree_before_removing_i
     ends = [each.launch for each in host.asked if isinstance(each, End)]
     assert "lost" in ends
     assert "elsewhere" not in ends
+
+
+def test_a_side_job_putting_its_report_before_the_operator_fails_its_step(
+    tmp_path: Path, clock: FakeClock
+) -> None:
+    host, trial = played(tmp_path, clock)
+    host.reporting.append(True)
+
+    steps = trial.run()
+
+    [side] = [each for each in steps if each.name == "spawns a side job"]
+    assert not side.passed
+    assert side.seen.startswith("the side job put @")
+    assert side.seen.endswith("before you, where its report is its spawner's alone")
+    # The trial goes on, and ends what the session spawned with the rest.
+    assert [each.name for each in steps][-1] == "back to held"
+
+
+def test_the_trial_removes_the_worktree_and_branch_of_each_launch_its_session_spawned(
+    tmp_path: Path, shell: Shell
+) -> None:
+    repository, main, commit = repository_with_a_worktree(tmp_path, shell)
+    made = repository / "tree" / "trial-side-job"
+    shell.git(
+        tmp_path,
+        "--git-dir",
+        str(repository),
+        "worktree",
+        "add",
+        "-q",
+        "--no-checkout",
+        "-b",
+        "trial-side-job",
+        str(made),
+        commit,
+    )
+    said: list[str] = []
+    scratch = Scratch(
+        path=main, repository=repository, tree=tmp_path, git=Git.pinned(repository)
+    )
+    outside = held("elsewhere").model_copy(update={"worktree": tmp_path / "elsewhere"})
+
+    side = held("side").model_copy(update={"worktree": made, "repository": repository})
+    scratch.unspawned([side, outside], said.append)
+
+    assert not made.exists()
+    assert (
+        shell.git(
+            tmp_path, "--git-dir", str(repository), "branch", "--list", "trial-side-job"
+        )
+        == ""
+    )
+    assert said == [f"{tmp_path / 'elsewhere'} isn't one a spawn made, so it's left."]
+
+
+def test_a_brief_told_twice_fails_its_spawn_step(
+    tmp_path: Path, clock: FakeClock
+) -> None:
+    """Given as the first turn and told again beside a hook, it reads as told some other way than its wake."""
+    host, trial = played(tmp_path, clock)
+    host.briefing.append("turn's start")
+
+    steps = trial.run()
+
+    [side] = [each for each in steps if each.name == "spawns a side job"]
+    assert not side.passed
+    assert "was told \"turn's start\", where it's given once as the first turn" in (
+        side.seen
+    )
+
+
+def test_a_launcher_a_service_before_started_for_a_spawn_is_counted_while_it_runs_and_its_spawner_told_where_it_never_came_up(
+    layout: Layout, tmp_path: Path
+) -> None:
+    """Kept beside its lock: a service started since, as an approval starts one, knows it by its process while it runs; once that's gone it forgets it, handing back for its spawner to hear of the one whose session never came up, as the service before it said, and the one it was told came up itself."""
+    spawner = Spawner(
+        launch="s0",
+        conversation=Conversation(
+            repository=tmp_path / ".git", runtime="claude", session="p1"
+        ),
+    )
+    layout.launches.mkdir(parents=True)
+
+    def kept(launch: str, pid: int, *, up: bool = False) -> None:
+        spec = HeldLaunch(
+            launch=launch, runtime="claude", worktree=tmp_path, spawner=spawner
+        )
+        layout.launch(launch).spawned.write_text(
+            SpawnedLauncher(spec=spec, pid=pid, up=up).model_dump_json()
+        )
+
+    # A program that keeps the launch's id among its arguments, as the
+    # launcher's command does: a shell may replace itself with what it runs.
+    running = detached(
+        sys.executable,
+        "-c",
+        "import time; time.sleep(60)",
+        "a1",
+        log=tmp_path / "a1.log",
+    )
+    gone = [
+        detached("true", launch, log=tmp_path / f"{launch}.log")
+        for launch in ["b1", "c1", "d1"]
+    ]
+    for each in gone:
+        each.process.wait()
+    cmdline = Path("/proc") / str(running.process.pid) / "cmdline"
+    for _ in range(600):
+        if b"a1" in cmdline.read_bytes():
+            break
+        time.sleep(0.01)
+    never, up, heard = gone
+    kept("a1", running.process.pid)
+    kept("b1", never.process.pid)
+    kept("c1", up.process.pid, up=True)
+    kept("d1", heard.process.pid)
+    launchers = Launchers()
+
+    async def called() -> None:
+        await CallingUp(layout=layout, launchers=launchers).answer(
+            CalledUp(launch="d1", name="four", session="s-4")
+        )
+
+    asyncio.run(called())
+    try:
+        counted = launchers.spawning(layout)
+        lost = launchers.reaped(layout)
+    finally:
+        running.process.kill()
+        running.process.wait()
+
+    assert [each.launch for each in counted] == ["a1"]
+    assert [each.launch for each in lost] == ["b1"]
+    assert layout.launch("a1").spawned.exists()
+    for launch in ["b1", "c1", "d1"]:
+        assert not layout.launch(launch).spawned.exists()
+
+
+def test_a_spawn_s_launcher_keeps_its_log_where_its_session_never_came_up(
+    layout: Layout, tmp_path: Path
+) -> None:
+    """Its spawner is told the log names why: one up, or the operator's own, has no such reader."""
+    layout.launches.mkdir(parents=True)
+    spec = HeldLaunch(launch="a1", runtime="claude", worktree=tmp_path)
+    write_model(layout.launch("a1").spawned, SpawnedLauncher(spec=spec, pid=1))
+    write_model(
+        layout.launch("b1").spawned,
+        SpawnedLauncher(spec=spec.model_copy(update={"launch": "b1"}), pid=1, up=True),
+    )
+
+    assert never_up(layout, "a1")
+    assert not never_up(layout, "b1")
+    assert not never_up(layout, "c1")
+
+
+def test_the_trial_s_cleanup_follows_no_link_a_room_planted_at_a_spawned_worktree(
+    tmp_path: Path, shell: Shell
+) -> None:
+    """A room writes `tree/`, so the path of a worktree its session spawned can be a link to another worktree, which git's own removal would find by its real path and remove."""
+    repository, main, commit = repository_with_a_worktree(tmp_path, shell)
+    precious = tmp_path / "elsewhere"
+    shell.git(
+        tmp_path,
+        "--git-dir",
+        str(repository),
+        "worktree",
+        "add",
+        "-q",
+        "--no-checkout",
+        "-b",
+        "kept",
+        str(precious),
+        commit,
+    )
+    (precious / "precious.txt").write_text("keep me\n")
+    made = repository / "tree" / "trial-side-job"
+    made.parent.mkdir(exist_ok=True)
+    made.symlink_to(precious)
+    said: list[str] = []
+    scratch = Scratch(
+        path=main, repository=repository, tree=tmp_path, git=Git.pinned(repository)
+    )
+    side = held("side").model_copy(update={"worktree": made, "repository": repository})
+
+    scratch.unspawned([side], said.append)
+
+    assert (precious / "precious.txt").read_text() == "keep me\n"
+    assert not made.is_symlink()
+
+
+def test_a_side_job_whose_spawner_s_launch_isn_t_served_is_orphaned_and_a_builder_isn_t() -> (
+    None
+):
+    spawner = Spawner(
+        launch="gone",
+        conversation=Conversation(
+            repository=Path("/w/.git"), runtime="claude", session="p1"
+        ),
+    )
+    side = held("side").model_copy(update={"spawner": spawner})
+    built = held("built").model_copy(
+        update={"spawner": spawner.model_copy(update={"concern": 4})}
+    )
+    kept = held("kept").model_copy(
+        update={"spawner": spawner.model_copy(update={"launch": "here"})}
+    )
+    # Restarted by the operator's words, it answers them: it runs to its report.
+    answering = held("answering").model_copy(
+        update={"spawner": spawner.model_copy(update={"restarted": True})}
+    )
+
+    assert cli.orphaned([side, built, kept, answering, held("here")]) == [side]
+
+
+def test_the_sweep_ends_each_side_job_whose_spawner_s_launch_isn_t_served(
+    layout: Layout, tmp_path: Path, clock: FakeClock
+) -> None:
+    """One handed a concern runs on: it's the operator's to end."""
+    host, _ = played(tmp_path, clock)
+    spawner = Spawner(launch="gone", conversation=host.conversation)
+    host.served[:] = [
+        held("side").model_copy(update={"spawner": spawner, "name": "side"}),
+        held("built").model_copy(
+            update={"spawner": spawner.model_copy(update={"concern": 3})}
+        ),
+    ]
+    said: list[str] = []
+    ended: list[str] = []
+
+    async def ending(launch: Register) -> None:
+        ended.append(launch.launch)
+
+    sweeping = cli.Sweeping(
+        layout=layout,
+        host=host,
+        podman=Podman(),
+        say=said.append,
+        running=list,
+        ended=ending,
+    )
+
+    async def swept() -> None:
+        await sweeping.orphans_ended()
+        await asyncio.gather(*sweeping.ending.values())
+
+    asyncio.run(swept())
+
+    assert ended == ["side"]
+    assert (
+        "side: a side job whose spawner's launch gone ended, so it's ended too"
+    ) in said
+
+
+def test_the_sweep_looks_at_side_jobs_worktrees_left_apart_one_look_at_a_time_and_says_one_failing(
+    layout: Layout, tmp_path: Path, clock: FakeClock
+) -> None:
+    """git reads refs a room writes, within its limits, and any part of a worktree's path can be a link a room made, leading where a look waits: the sweep doesn't wait on it, and starts no other while one runs."""
+    host, _ = played(tmp_path, clock)
+    tidies: list[int] = []
+    said: list[str] = []
+
+    async def swept() -> bool:
+        released = asyncio.Event()
+
+        async def left() -> None:
+            tidies.append(1)
+            await released.wait()
+            message = "the room's git left a lock behind"
+            raise OSError(message)
+
+        sweeping = cli.Sweeping(
+            layout=layout,
+            host=host,
+            podman=Podman(),
+            say=said.append,
+            running=list,
+            left=left,
+        )
+        sweeping.looked_left()
+        await asyncio.sleep(0)
+        sweeping.looked_left()
+        running = sweeping.leaving is not None and not sweeping.leaving.done()
+        released.set()
+        if sweeping.leaving is not None:
+            await sweeping.leaving
+        return running
+
+    assert asyncio.run(swept())
+    assert tidies == [1]
+    [failed] = said
+    assert failed.startswith("The look at side jobs' worktrees left failed:\n")
+    assert failed.endswith("OSError: the room's git left a lock behind\n")
+
+
+def test_side_jobs_the_sweep_ends_hold_none_of_the_threads_the_judge_s_hooks_wait_on(
+    layout: Layout, tmp_path: Path, clock: FakeClock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An end is answered once its session's turn finished, minutes later: a room orphaning as many side jobs as it may, its own launch ended, once held as many of asyncio's default threads, which the service's hooks wait on too."""
+    host, _ = played(tmp_path, clock)
+    spawner = Spawner(launch="gone", conversation=host.conversation)
+    host.served[:] = [
+        held(f"side{number}").model_copy(
+            update={"spawner": spawner, "name": f"side{number}"}
+        )
+        for number in range(40)
+    ]
+    released = threading.Event()
+    answered = Played.held
+
+    def unanswered(self: Played, request: Request) -> Outstanding:
+        released.wait(20)
+        return answered(self, request)
+
+    monkeypatch.setattr(Played, "held", unanswered)
+    ended: list[str] = []
+
+    async def ending(launch: Register) -> None:
+        ended.append(launch.launch)
+        await asyncio.Event().wait()
+
+    sweeping = cli.Sweeping(
+        layout=layout,
+        host=host,
+        podman=Podman(),
+        say=lambda _: None,
+        running=list,
+        ended=ending,
+    )
+
+    async def swept() -> bool:
+        await sweeping.orphans_ended()
+        await asyncio.sleep(0.1)
+        try:
+            await asyncio.wait_for(asyncio.to_thread(int), 5)
+        except TimeoutError:
+            return False
+        finally:
+            released.set()
+            for each in sweeping.ending.values():
+                each.cancel()
+        return True
+
+    free = asyncio.run(swept())
+
+    assert free
+    assert sorted(ended) == sorted(f"side{number}" for number in range(40))
+
+
+def process_table(root: Path, processes: dict[int, tuple[str, dict[int, str]]]) -> Path:
+    """A processes' directory as `/proc` lays one out, each process's command line and its descriptors' links, Yama's scope at 1."""
+    for pid, (command, descriptors) in processes.items():
+        fds = root / str(pid) / "fd"
+        fds.mkdir(parents=True)
+        (root / str(pid) / "cmdline").write_bytes(
+            b"".join(f"{word}\0".encode() for word in command.split())
+        )
+        for fd, target in descriptors.items():
+            (fds / str(fd)).symlink_to(target)
+    (root / "sys" / "kernel" / "yama").mkdir(parents=True)
+    (root / "sys" / "kernel" / "yama" / "ptrace_scope").write_text("1\n")
+    return root
+
+
+def probed(tmp_path: Path, processes: dict[int, tuple[str, dict[int, str]]]) -> Ran:
+    """Run the trial's probe over the processes given, as in a room."""
+    table = process_table(tmp_path / "proc", processes)
+    probe = Trial.model_fields["forging"].default
+    assert isinstance(probe, str)
+    return run(sys.executable, "-c", probe, str(table), checked=False)
+
+
+INIT = (
+    "catatonit -- python3 -I /l/connected.py /run/lup/session.sock lup-environment "
+    "claude --output-format stream-json --input-format stream-json"
+)
+"""podman's `--init`, pid 1: its command line carries the whole command it runs,
+`--input-format` among it, and its input is `/dev/null`."""
+
+
+def test_the_room_s_probe_tries_the_runtime_s_socket_never_init_s_dev_null(
+    tmp_path: Path,
+) -> None:
+    ran = probed(
+        tmp_path,
+        {
+            1: (INIT, {0: "/dev/null"}),
+            7: (
+                "claude --input-format stream-json",
+                {0: "socket:[42]", 1: "socket:[42]"},
+            ),
+            9: ("bash -c ls", {0: "pipe:[7]"}),
+        },
+    )
+
+    said = json.loads(ran.output)
+    assert ran.status == 2, said
+    assert said["session"] == "7 (claude --input-format), its input socket:[42]"
+    assert said["tried"] == [
+        (
+            "7 (claude --input-format), its input socket:[42]: opening it refused, "
+            "No such file or directory"
+        ),
+        (
+            "1 (catatonit --), its input /dev/null: not tried, its input is neither "
+            "a socket nor a pipe"
+        ),
+    ]
+    assert said["holding"] == []
+
+
+def test_the_room_s_probe_finds_no_session_on_a_file_and_names_another_holding_its_socket(
+    tmp_path: Path,
+) -> None:
+    writable = tmp_path / "input"
+    writable.write_text("")
+    ran = probed(
+        tmp_path,
+        {
+            1: (INIT, {0: "/dev/null"}),
+            7: ("claude --input-format stream-json", {0: str(writable)}),
+            8: ("nc -l", {0: "socket:[5]"}),
+        },
+    )
+    held_too = probed(
+        tmp_path / "again",
+        {
+            7: ("claude --input-format stream-json", {0: "socket:[42]"}),
+            12: ("sh", {0: "/dev/null", 3: "socket:[42]"}),
+        },
+    )
+
+    # A runtime whose input isn't a socket isn't the session's; a socket's
+    # process is tried, and the session answering alone says a turn got through.
+    assert ran.status == 3, ran.output
+    assert held_too.status == 4, held_too.output
+    assert json.loads(held_too.output)["holding"] == ["12 (sh), its input /dev/null"]

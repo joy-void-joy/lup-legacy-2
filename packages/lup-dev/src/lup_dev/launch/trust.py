@@ -118,6 +118,7 @@ from lup_dev.approval import (
     Approval,
     GitTool,
     ReleaseTool,
+    Spawnable,
     Tool,
     WorkspaceTool,
     approved,
@@ -145,7 +146,7 @@ from lup_dev.errors import LupDevError
 from lup_dev.gate import invoked
 from lup_dev.git import Git, Tracked
 from lup_dev.host.client import HostClient, Outstanding
-from lup_dev.host.protocol import Branches, HostError
+from lup_dev.host.protocol import Behind, Branches, HostError
 from lup_dev.inbox.protocol import (
     AnswerApproval,
     AskApproval,
@@ -651,7 +652,7 @@ def reinstalled(approval: Approval, *, again: bool) -> str:
 
 
 class BranchesRead(Model):
-    """The branches a declaration just approved names, what the approval's answer says of them, and the declaration as judging reads it."""
+    """The branches a declaration just approved names, what the approval's answer says of them, the declaration as judging reads it, and the other repositories it lets its sessions spawn in."""
 
     branches: Branches
     said: str | None = None
@@ -659,6 +660,9 @@ class BranchesRead(Model):
     as they did."""
     declaration: Declaration | None = None
     """What the approval keeps of it (`Approval.declaration`): where it doesn't
+    load, what the approval before kept."""
+    spawnable: list[Spawnable] = []
+    """What the approval keeps of them (`Approval.spawnable`): where it doesn't
     load, what the approval before kept."""
 
 
@@ -767,17 +771,25 @@ class Trusted(Model):
 
 
 class Kept(Model):
-    """The operator declined the tip's host zone: the copy approved before stays."""
+    """The operator declined the tip's host zone, or a launch an agent spawned asked nothing about it: the copy approved before stays."""
 
     commit: str
     approval: Approval
     again: bool = False
     """Whether the repository's copy approved before was missing, and installed again."""
+    asked: bool = True
+    """Whether the operator was asked, and declined; not for a launch an agent
+    spawned, which never asks (`Trust.asking`)."""
 
     def report(self) -> str:
         """Say that the tip isn't the code judging the session, and what is."""
+        how = (
+            "Declined"
+            if self.asked
+            else "Not asked, the launch being an agent's spawn, which never asks"
+        )
         return (
-            "Declined: the tip isn't the code judging this session. The host keeps "
+            f"{how}: the tip isn't the code judging this session. The host keeps "
             f"running `lup-dev` from {self.approval.commit}, which you approved; the "
             f"host zone at {self.commit} differs from it."
             + reinstalled(self.approval, again=self.again)
@@ -803,6 +815,15 @@ class Unanswered(Model):
 
 type Outcome = Unchanged | Trusted | Kept | Unanswered
 """What `Trust.ensure` came to: approved before, approved at this check, declined, or approved with a copy that doesn't answer."""
+
+
+def behind(outcome: Outcome) -> Behind | None:
+    """Return the host code a launch that asked nothing runs, and the tip's it didn't ask about, where they differ (`Trust.asking`); none where it runs the tip's, or the operator answered."""
+    match outcome:
+        case Kept(asked=False, approval=approval, commit=commit):
+            return Behind(running=approval.commit, tip=commit)
+        case _:
+            return None
 
 
 class Elsewhere(ABC):
@@ -1105,9 +1126,9 @@ class Toolchain(ABC):
 
     @abstractmethod
     def install(
-        self, tool: Tool, root: Path, commit: str, copy: CopyLayout, *, users: bool
+        self, tool: Tool, git: Git, commit: str, copy: CopyLayout, *, users: bool
     ) -> None:
-        """Install `tool` at `commit`, in the repository at `root`, as the repository's `copy`, a directory no process runs.
+        """Install `tool` at `commit`, read from the repository `git` runs in, as the repository's `copy`, a directory no process runs.
 
         With `users`, it's the copy a person runs and the host service runs from
         too, which what's installed beside it for them comes with: the dashboard.
@@ -1150,7 +1171,7 @@ class UvToolchain(Model, Toolchain, arbitrary_types_allowed=True):
 
     @override
     def install(
-        self, tool: Tool, root: Path, commit: str, copy: CopyLayout, *, users: bool
+        self, tool: Tool, git: Git, commit: str, copy: CopyLayout, *, users: bool
     ) -> None:
         """Install the commit's copy: built from its source, or the release it pins.
 
@@ -1163,7 +1184,7 @@ class UvToolchain(Model, Toolchain, arbitrary_types_allowed=True):
             case WorkspaceTool():
                 with tempfile.TemporaryDirectory() as scratch:
                     tree = Path(scratch)
-                    Git(cwd=root).export(commit, tree)
+                    git.export(commit, tree)
                     self.build(tree)
                     self.built(tool, tree, copy, users=users)
             case ReleaseTool():
@@ -1810,6 +1831,18 @@ class Trust(Model, arbitrary_types_allowed=True):
 
     root: Path
     """The worktree it's run from; the zone is its repository's."""
+    found: Path | None = None
+    """The repository's git directory, where a launch found it already, from
+    its starting point or as the host recorded a spawn's: git is pinned there
+    (`Git.pinned`), never led through the worktree's `.git` file again, which
+    a room writes. None finds it through `root`, as the operator's own
+    `lup-dev trust` does in their worktree."""
+    asking: bool = True
+    """Whether it asks the operator where the tip's host zone isn't the one
+    approved: not for a launch an agent spawned, which runs on the copy
+    approved before, as a decline leaves it, so a room never picks when the
+    operator is asked, by moving the running branch and then spawning. Asks
+    come from the operator's own launches and from pushes alone."""
     reading: Path | None = None
     """The worktree an approval it asks has its types read in, where that's not
     `root` (`proposed`): a bare repository's own directory holds no project, so
@@ -1849,12 +1882,18 @@ class Trust(Model, arbitrary_types_allowed=True):
         return self.standing(self.repository())
 
     def repository(self) -> Path:
-        """Return the git directory every worktree of the repository shares, which keys its approval."""
+        """Return the git directory every worktree of the repository shares, which keys its approval: the one found already, where it was."""
+        if self.found is not None:
+            return self.found
         return Path(
             Git(cwd=self.root).text(
                 "rev-parse", "--path-format=absolute", "--git-common-dir"
             )
         )
+
+    def git(self) -> Git:
+        """Return git for the repository's objects and refs: pinned to its git directory where it was found already, else run in `root`."""
+        return Git(cwd=self.root) if self.found is None else Git.pinned(self.found)
 
     def standing(self, repository: Path) -> Standing:
         """Read the tip's host zone, beside the approval kept for `repository`."""
@@ -1882,7 +1921,7 @@ class Trust(Model, arbitrary_types_allowed=True):
         `TrustError` before any commit, or where the lock doesn't say which
         `lup-dev` the host runs.
         """
-        git = Git(cwd=self.root)
+        git = self.git()
         repository = self.repository()
         branches = approved_branches(self.layout, repository)
         commit = (
@@ -1902,7 +1941,7 @@ class Trust(Model, arbitrary_types_allowed=True):
     def zone_at(self, commit: str) -> Zone:
         """Read the host zone at the commit `commit`, with the person's own layer and their profiles: see `zone`. Raise `TrustError` where the lock doesn't say which `lup-dev` the host runs."""
         tool = self.tool(commit)
-        own = person_layer(self.root)
+        own = person_layer(self.root, self.git())
         local = own.read_text() if own.is_file() else None
         declared = self.layout.profiles.declared
         profiles = declared.read_text() if declared.is_file() else None
@@ -1935,7 +1974,7 @@ class Trust(Model, arbitrary_types_allowed=True):
     def tool(self, commit: str) -> Tool:
         """Read which `lup-dev` the host runs from the commit's `uv.lock`."""
         lock = CheckoutLayout(root=Path()).lock
-        git = Git(cwd=self.root)
+        git = self.git()
         found = [
             each.object
             for each in git.held(commit)
@@ -1962,7 +2001,7 @@ class Trust(Model, arbitrary_types_allowed=True):
         """
         with tempfile.TemporaryDirectory() as scratch:
             source = Path(scratch)
-            Git(cwd=self.root).export(commit, source, read_by_import)
+            self.git().export(commit, source, read_by_import)
             if local is not None:
                 CheckoutLayout(root=source).local_declaration.write_text(local)
             return declared(source, covered)
@@ -1981,7 +2020,7 @@ class Trust(Model, arbitrary_types_allowed=True):
             f"{each.mode} {each.kind} {each.object}\t".encode()
             + os.fsencode(each.path)
             + b"\0"
-            for each in Git(cwd=self.root).held(zone.commit)
+            for each in self.git().held(zone.commit)
             if any(Path(each.path).is_relative_to(path) for path in zone.paths)
         )
         digest = hashlib.sha256(listed)
@@ -2008,7 +2047,7 @@ class Trust(Model, arbitrary_types_allowed=True):
         host service follows with the whole judgement once it's asked (`typed`);
         where the judge fails, the files go unread and the summary says why.
         """
-        git = Git(cwd=self.root)
+        git = self.git()
         zone = standing.zone
         approval = standing.approval
         tool = zone.tool.said(approval.tool if approval is not None else None)
@@ -2215,6 +2254,8 @@ class Trust(Model, arbitrary_types_allowed=True):
                 # The tip's zone is the approved one, so its copy is the same.
                 again = self.reinstall(approval, zone.commit, copy)
                 return Unchanged(commit=zone.commit, approval=approval, again=again)
+            if not self.asking:
+                return self.unasked(standing, copy)
             if self.inside:
                 message = (
                     f"this runs inside a {self.inside[0]} session, and an agent "
@@ -2257,6 +2298,21 @@ class Trust(Model, arbitrary_types_allowed=True):
             return self.ensure()
         with lock:
             return self.answered(repository, standing, given)
+
+    def unasked(self, standing: Standing, copy: JudgeLayout) -> Kept:
+        """Keep the copy approved before, asking nothing, as a decline does, for a launch an agent spawned (`asking`); raise `TrustError` where none was approved, so nothing launches."""
+        approval = standing.approval
+        zone = standing.zone
+        if approval is None:
+            message = (
+                f"the host zone at {zone.commit} isn't approved, and none was "
+                "approved before, so there's no `lup-dev` the host may run; a "
+                "launch an agent spawned asks nothing, so nothing launches until "
+                "you approve one from your own terminal"
+            )
+            raise TrustError(message)
+        again = self.reinstall(approval, approval.commit, copy)
+        return Kept(commit=zone.commit, approval=approval, again=again, asked=False)
 
     def proposed(self, pushed_by: Conversation | None = None) -> int | None:
         """Put the approval of the tip's host zone in the operator's inbox where it isn't the one approved, asking nothing here, and return its number; none where it's approved.
@@ -2368,6 +2424,7 @@ class Trust(Model, arbitrary_types_allowed=True):
             profiles=zone.profiles,
             branches=read.branches,
             declaration=read.declaration,
+            spawnable=read.spawnable,
         )
         if now is not None and now.commit == zone.commit and now.tool == zone.tool:
             # Only the person's own layer or their profiles changed, which the
@@ -2398,23 +2455,40 @@ class Trust(Model, arbitrary_types_allowed=True):
         return Unanswered(commit=zone.commit, approval=now, said=switch.report())
 
     def read_branches(self, zone: Zone, now: Approval | None) -> BranchesRead:
-        """Read the branches the declaration at `zone`'s commit names, and the declaration as judging reads it, its person's own layer on it: what the operator has just approved, so it may run.
+        """Read the branches the declaration at `zone`'s commit names, the declaration as judging reads it, and the other repositories it lets its sessions spawn in, its person's own layer on it: what the operator has just approved, so it may run.
 
         Exported from git's objects and imported as a launch imports the
         declaration approved (`approved_declaration`). Where it doesn't load,
         they stay what `now` says, as the judge's last declaration that loaded
-        stands in for one that can't, and the answer says so.
+        stands in for one that can't, and the answer says so. A repository it
+        lets its sessions spawn in is found on the host as a launch finds the
+        repositories it relates (`related`): its path from the directory
+        holding this one's main worktree, read from its git directory, or
+        absolute.
         """
         before = Branches() if now is None else now.branches
         try:
             with tempfile.TemporaryDirectory(prefix="lup-branches-") as scratch:
                 source = Path(scratch)
-                Git(cwd=self.root).export(zone.commit, source, read_by_import)
+                self.git().export(zone.commit, source, read_by_import)
                 if zone.local is not None:
                     CheckoutLayout(root=source).local_declaration.write_text(zone.local)
                 declared = load(source)
-                after = resolve(declared.project).branches
+                resolved = resolve(declared.project)
+                after = resolved.branches
                 declaration = Declaration.of(declared.project, declared.source)
+                # Not from git's list of worktrees, which follows a `commondir`
+                # a room can plant where trust runs unpinned: from the git
+                # directory approvals are kept by, a clone's `.git` or a bare
+                # repository's own, as its main worktree is.
+                common = self.repository()
+                main = common.parent if common.name == ".git" else common
+                holding = main.parent
+                spawnable = [
+                    Spawnable(name=each.name, path=each.on_host(holding))
+                    for each in resolved.repositories
+                    if each.spawn
+                ]
         except ProjectError as failure:
             said = (
                 f"The branches stay `{before.integration}` to integrate on and "
@@ -2425,11 +2499,13 @@ class Trust(Model, arbitrary_types_allowed=True):
                 branches=before,
                 said=said,
                 declaration=None if now is None else now.declaration,
+                spawnable=[] if now is None else now.spawnable,
             )
         return BranchesRead(
             branches=after,
             said=branches_moved(before, after),
             declaration=declaration,
+            spawnable=spawnable,
         )
 
     def reapproved(self, recorded: Approval, copy: JudgeLayout) -> None:
@@ -2447,7 +2523,7 @@ class Trust(Model, arbitrary_types_allowed=True):
         """
         if copy.command(approval.tool.name).is_file():
             return False
-        if Git(cwd=self.root).commit(commit) is None:
+        if self.git().commit(commit) is None:
             message = (
                 f"this repository's copy of `{approval.tool.name}`, approved at "
                 f"{commit}, is missing from {copy.home}, and that commit is gone "
@@ -2472,7 +2548,7 @@ class Trust(Model, arbitrary_types_allowed=True):
         copy = self.layout.judge(repository)
         if Copies(layout=copy).running() is not None:
             return None
-        if Git(cwd=self.root).commit(approval.commit) is None:
+        if self.git().commit(approval.commit) is None:
             return None
         kept = self.layout.approved(repository)
         with (
@@ -2495,7 +2571,9 @@ class Trust(Model, arbitrary_types_allowed=True):
         """
         held = Copies(layout=copies)
         with held.installing() as copy:
-            self.toolchain.install(tool, self.root, commit, copy, users=tool.lups_own())
+            self.toolchain.install(
+                tool, self.git(), commit, copy, users=tool.lups_own()
+            )
             if approval is not None and tool.lups_own():
                 held.recorded(self.kept(copy, approval))
             held.switch(copy)
@@ -2506,7 +2584,7 @@ class Trust(Model, arbitrary_types_allowed=True):
         held = Copies(layout=copies)
         with held.installing() as copy:
             self.toolchain.install(
-                approval.tool, self.root, approval.commit, copy, users=True
+                approval.tool, self.git(), approval.commit, copy, users=True
             )
             kept = self.kept(copy, approval)
             held.recorded(kept)
@@ -2514,7 +2592,7 @@ class Trust(Model, arbitrary_types_allowed=True):
 
     def kept(self, copy: CopyLayout, approval: Approval) -> KeptCopy:
         """Return the record of `copy`, installed for `approval`, with the first line of its commit, printable alone, since a room wrote it."""
-        subject = Git(cwd=self.root).subject(approval.commit)
+        subject = self.git().subject(approval.commit)
         return KeptCopy(
             name=copy.home.name,
             repository=self.repository(),
@@ -2528,12 +2606,17 @@ def machine_trust(
     inside: list[str],
     reading: Path | None = None,
     asker: Asker | None = None,
+    *,
+    found: Path | None = None,
+    asking: bool = True,
 ) -> Trust:
     """Return trust on launch for the repository at `root`, with this machine's settings, the terminal, the inbox in the host service, uv, the service's client, and the engine and ruff to judge the zone's change with.
 
     `inside` names the runtimes whose session this runs inside, `reading`
     the worktree an approval it asks has its types read in (`Trust.reading`),
-    and `asker` where it asks, this terminal by default.
+    `asker` where it asks, this terminal by default, `found` the
+    repository's git directory, where a launch found it already
+    (`Trust.found`), and `asking` whether it asks at all (`Trust.asking`).
     """
     settings = LupDevSettings()
     layout = Layout.of(settings)
@@ -2542,6 +2625,8 @@ def machine_trust(
     toolchain = UvToolchain()
     return Trust(
         root=root,
+        found=found,
+        asking=asking,
         reading=reading,
         layout=layout,
         asker=Terminal() if asker is None else asker,
@@ -2564,10 +2649,10 @@ def machine_trust(
     )
 
 
-def trusted(root: Path, inside: list[str]) -> Outcome:
-    """Check what the host runs for the repository at `root`: a launch's first step.
+def trusted(root: Path, inside: list[str], *, found: Path | None = None) -> Outcome:
+    """Check what the host runs for the repository at `root`, whose git directory a launch `found` already where it's given: a launch's first step.
 
     As `Trust.ensure` does, on this machine (`machine_trust`). Raise
     `TrustError` where nothing approved may run.
     """
-    return machine_trust(root, inside).ensure()
+    return machine_trust(root, inside, found=found).ensure()

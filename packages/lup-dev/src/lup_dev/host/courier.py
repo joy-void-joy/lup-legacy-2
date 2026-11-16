@@ -90,6 +90,11 @@ class Heard(Model):
     says (`docs/field-notes.md`, *A conversation resumed in a later launch*).
     A new main session is told where their repository stands then, and only
     then."""
+    forked: bool = False
+    """At a session's own start, whether their conversation is another's,
+    forked: it holds all that one said, under an id of its own, as both
+    runtimes' `fork` start says. A session an agent forked through lup's
+    `spawn` is told then what it is (`Delivery.introduced`)."""
     anew: bool = False
     """At a session's own start, whether it's a new process of the runtime,
     started or resumed, rather than its conversation cleared or compacted in

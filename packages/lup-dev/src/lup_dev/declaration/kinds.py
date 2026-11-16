@@ -552,6 +552,15 @@ class Repository(Model, extra="forbid"):
     github: str | None = None
     """Its `owner/name` on GitHub, where it has one, which the guidance gives so
     a session reads its issues through lup's GitHub tools."""
+    spawn: bool = False
+    """Whether the project's sessions may file a concern straight into its
+    `No agent`, and, once lup can make a worktree there, start agents in it with
+    `spawn` (`docs/launch.md`, *In another repository*): an opening in a room's
+    walls, so none unless it's said. The host reads it from what it kept as the
+    operator approved the project's declaration, never from a copy a room
+    wrote: the person's own layer is where it belongs, as every `Repository`
+    does, though one the operator approved in the project's own reads the
+    same."""
 
     def on_host(self, holding: Path) -> Path:
         """Return where it is on the host: its path from `holding`, the directory holding the project's own repository, or absolute, a leading `~` the operator's home, resolved.
