@@ -269,6 +269,7 @@ from lup_dev.launch.room import (
     receiving,
     refreshed,
     related,
+    room_commands,
     room_copy,
     room_git,
     unclaimed,
@@ -2411,13 +2412,15 @@ def swept(
 
 
 class Sweeping(MutableModel, Companion, arbitrary_types_allowed=True):
-    """The sweep beside the host service: once it listens, then every `every`, so a launch whose launcher and container are gone is ended though no launch follows it (`swept`), a repository's approved copy no process runs and none judges is removed (`lup_dev/copies.py`), and each thread parked until a time that came, a conversation that ended or a condition the gate found holding is woken (`Coming.swept`): the one moment the host looks of its own accord, whether a session runs or not.
+    """The sweep beside the host service: once it listens, then every `every`, so a launch whose launcher and container are gone is ended though no launch follows it (`swept`), a repository's approved copy no process runs, no served launch's room has and none judges is removed (`lup_dev/copies.py`), and each thread parked until a time that came, a conversation that ended or a condition the gate found holding is woken (`Coming.swept`): the one moment the host looks of its own accord, whether a session runs or not.
 
     It asks the service as a launch does, from a thread, so the service goes on
     answering meanwhile; its end waits for a sweep under way, so none outlives
     the service's socket. The copies to remove are chosen on the event loop,
     beside the repositories' processes starting, so none is chosen as one
-    starts from it, and removed from a thread.
+    starts from it, and removed from a thread. A launch links its room's copy
+    before it registers (`RoomCopy.write`), so one served after the launches
+    are listed has the copy that judges, which is never removed.
     """
 
     layout: Layout
@@ -2554,9 +2557,28 @@ class Sweeping(MutableModel, Companion, arbitrary_types_allowed=True):
             self.say(f"Waking the threads parked until what came failed:\n{told}")
 
     async def pruned(self) -> None:
-        """Remove each repository's copies no process runs and none judges, saying each; where one can't be, say why, and the next sweep tries again."""
+        """Remove each repository's copies no process runs, no served launch's room has and none judges, saying each; where one can't be, say why, and the next sweep tries again.
+
+        A room keeps the copy it was given until its launch ends, however the
+        approval moves (`RoomCopy`): removed, its `lup-dev` would fail, the gate
+        and `land` among it. So where the launches can't be listed, none is
+        removed.
+        """
         try:
-            unused = removable(self.layout.judges, self.running())
+            launches = await asyncio.to_thread(self.host.launches)
+        except (HostError, OSError) as failed:
+            self.say(
+                "The copies of `lup-dev` nothing runs weren't looked for, as the "
+                f"launches, whose rooms may run one, couldn't be listed: {failed}"
+            )
+            return
+        try:
+            rooms = [
+                command
+                for each in launches
+                for command in room_commands(self.layout.launch(each.launch))
+            ]
+            unused = removable(self.layout.judges, [*self.running(), *rooms])
         except OSError as failed:
             self.say(
                 f"The copies of `lup-dev` nothing runs weren't looked for: {failed}"
@@ -2869,6 +2891,8 @@ def launched(
                         f"Removed {each}, the environments of a launch that ended "
                         "without removing them."
                     )
+                if copied is not None:
+                    copied.write()
                 served = launcher.host.register(registered)
                 sockets = served.directory
                 launcher.say(f"This launch is `{served.name}`.")
@@ -2876,8 +2900,6 @@ def launched(
                 try:
                     cleared(launcher.podman, served.container, launcher.say)
                     git.write()
-                    if copied is not None:
-                        copied.write()
                     clipboard = RoomClipboard(launch=own)
                     clipboard.write()
                     ages.write()
