@@ -1375,6 +1375,39 @@ def test_a_worktree_a_gone_run_left_is_removed_and_a_running_one_s_kept(
     assert str(live) in listed
 
 
+class PrunedElsewhere(Witness):
+    """Answers the gate run on a commit as `Witness` does, a `git worktree prune` run meanwhile where the worktree made isn't there, as in another room, whose temporary directory is its own."""
+
+    def __init__(self, repo: Path, shell: Git) -> None:
+        super().__init__()
+        self.repo = repo
+        self.shell = shell
+
+    @override
+    def run(self, command: list[str], cwd: Path) -> Ran:
+        away = cwd.with_name(f"{cwd.name}.away")
+        cwd.rename(away)
+        try:
+            self.shell.git(self.repo, "worktree", "prune")
+        finally:
+            away.rename(cwd)
+        return super().run(command, cwd)
+
+
+def test_at_a_commit_a_prune_where_its_worktree_isn_t_there_leaves_the_run_whole(
+    repo: Path, shell: Git, clock: FakeClock
+) -> None:
+    processes = PrunedElsewhere(repo, shell)
+
+    outcome, _, stopped = gated_at(repo, "HEAD", processes, clock)
+
+    assert outcome == Ran(code=0, output="the report, ending 0\n")
+    [(_, made)] = processes.ran
+    assert stopped == [made]
+    assert not made.exists()
+    assert str(made) not in shell.git(repo, "worktree", "list")
+
+
 def test_at_a_revision_naming_no_commit_is_refused(
     repo: Path, clock: FakeClock
 ) -> None:
