@@ -645,6 +645,13 @@ def at_commit(
     its files the ones the pass is recorded for. A pass found answers as
     without, since on files the gate passed the fixes change nothing.
 
+    The worktree made is locked (`LOCKED`), so a `git worktree prune` run
+    where its directory isn't there keeps git's record of it: each room has a
+    temporary directory of its own, and a run in another room, or one of
+    `leftovers`, would otherwise prune the record mid-run, and removing the
+    worktree would then fail as not one. A locked worktree is removed with
+    `--force` twice.
+
     Raise `GateError` where `revision` names no commit.
     """
     git = Git(cwd=root)
@@ -670,6 +677,9 @@ def at_commit(
                 "worktree",
                 "add",
                 "--detach",
+                "--lock",
+                "--reason",
+                LOCKED,
                 "--quiet",
                 str(made),
                 commit,
@@ -690,7 +700,9 @@ def at_commit(
             amended = fixed(made, files) if fix and ran.code == 0 else None
         finally:
             stop(made)
-            git.run("worktree", "remove", "--force", str(made), within=git.whole)
+            git.run(
+                "worktree", "remove", "--force", "--force", str(made), within=git.whole
+            )
     (locks / f"{made.name}.lock").unlink(missing_ok=True)
     passed = (
         files
@@ -730,6 +742,9 @@ def fixed(made: Path, files: Standing) -> str | None:
 MADE = "lup-gate-"
 """What the name of each worktree a run of the gate on a commit makes starts with, in the system's temporary directory."""
 
+LOCKED = "lup's gate runs here; it removes the worktree when it's done"
+"""Why each worktree a run of the gate on a commit makes is locked, as `git worktree list` shows it."""
+
 
 def leftovers(git: Git, locks: Path) -> list[Path]:
     """Remove each worktree a run of the gate on a commit made and left behind, its run gone, and return them.
@@ -737,7 +752,10 @@ def leftovers(git: Git, locks: Path) -> list[Path]:
     A run that's gone holds no lock on its worktree (`GitDirectoryLayout.gates`),
     as one still running does, so the two are told apart, and a run killed
     mid-gate, as a push timed out from its session might be, leaves nothing for
-    long. git's records of worktrees whose directories are gone are pruned too.
+    long. git's records of worktrees whose directories are gone are pruned too,
+    except a locked one's, as a running gate's is wherever its directory isn't
+    there (`at_commit`). A run killed in a room that has ended leaves its
+    record, locked, for `git worktree remove --force --force` by hand.
     """
     scratch = Path(tempfile.gettempdir())
     made = [
@@ -747,7 +765,7 @@ def leftovers(git: Git, locks: Path) -> list[Path]:
     ]
     gone = [each for each in made if not running(locks / f"{each.name}.lock")]
     for each in gone:
-        git.run("worktree", "remove", "--force", str(each), within=git.whole)
+        git.run("worktree", "remove", "--force", "--force", str(each), within=git.whole)
         (locks / f"{each.name}.lock").unlink(missing_ok=True)
     git.run("worktree", "prune")
     return gone
