@@ -9768,6 +9768,97 @@ def test_land_puts_the_branch_on_dev_and_cleans_up_what_it_landed_but_what_s_in_
     ]
 
 
+def test_land_whose_push_is_refused_where_another_call_pushed_the_same_commit_has_landed(
+    landings: Landings,
+    machine: Layout,
+    clock: FakeClock,
+    notices: Raised,
+    said: list[str],
+) -> None:
+    feat, repository = landings.feat, landings.repository
+    landings.wrote(feat, "src/pkg/rooms.py", '"""Rooms."""\n')
+    landings.shell.git(repository, "push", "-q", "origin", "feat")
+    old = landings.on_forge("refs/heads/dev")
+    tip = landings.merged()
+    raced: list[list[str]] = []
+
+    async def racing(program: Program) -> Ran:
+        """Push as git does, but the first push to `dev` is another call's: it lands, and this one's is refused as the remote refuses the second of two at once."""
+        ran = await executed(program)
+        onto = any(each.endswith(":refs/heads/dev") for each in program.command)
+        if raced or "push" not in program.command or not onto or ran.status != 0:
+            return ran
+        raced.append(program.command)
+        refused = (
+            f" ! [remote rejected] {tip} -> dev (cannot lock ref 'refs/heads/dev': "
+            f"is at {tip} but expected {old})\n"
+        )
+        return Ran(command=program.command, status=1, error=refused.encode())
+
+    with inboxed(
+        machine,
+        clock,
+        notices,
+        said,
+        rooms=landings.room,
+        parser=landings.parser,
+        remotes=lambda _: Remotes(say=said.append, run=racing),
+    ):
+        landings.launched("claude")
+        send(machine.host.launch("one").hook, started("claude"))
+        answer, error = call(machine.host.launch("one").mcp, "land", {})
+    assert not error
+    assert raced
+    landed, alongside, *rest = answer.splitlines()
+    assert landed == f"Landed {tip} on `dev` at `origin`, which was at {old}."
+    assert alongside.startswith("`origin` refused this push (")
+    assert alongside.endswith(
+        f"as `dev` there was at {tip} already: another call of `land` pushed the "
+        "same commit at the same time."
+    )
+    assert "- deleted `feat` on `origin`" in rest
+    assert landings.on_forge("refs/heads/dev") == tip
+    assert landings.on_forge("refs/heads/feat") is None
+
+
+def test_land_whose_push_is_refused_where_the_remote_holds_something_else_hasn_t_landed(
+    landings: Landings,
+    machine: Layout,
+    clock: FakeClock,
+    notices: Raised,
+    said: list[str],
+) -> None:
+    landings.wrote(landings.feat, "src/pkg/rooms.py", '"""Rooms."""\n')
+    old = landings.on_forge("refs/heads/dev")
+    tip = landings.merged()
+
+    async def refusing(program: Program) -> Ran:
+        """Refuse every push to `dev`, as a remote does whose `dev` moved to something else meanwhile."""
+        onto = any(each.endswith(":refs/heads/dev") for each in program.command)
+        if "push" not in program.command or not onto:
+            return await executed(program)
+        refused = f" ! [remote rejected] {tip} -> dev (cannot lock ref)\n"
+        return Ran(command=program.command, status=1, error=refused.encode())
+
+    with inboxed(
+        machine,
+        clock,
+        notices,
+        said,
+        rooms=landings.room,
+        parser=landings.parser,
+        remotes=lambda _: Remotes(say=said.append, run=refusing),
+    ):
+        landings.launched("claude")
+        send(machine.host.launch("one").hook, started("claude"))
+        answer, error = call(machine.host.launch("one").mcp, "land", {})
+    assert not error
+    assert answer.startswith("Not landed: ")
+    assert "cannot lock ref" in answer
+    assert landings.on_forge("refs/heads/dev") == old
+    assert landings.feat.exists()
+
+
 def test_land_removes_worktrees_in_the_container_the_launch_has_when_it_cleans_up(
     landings: Landings,
     machine: Layout,
