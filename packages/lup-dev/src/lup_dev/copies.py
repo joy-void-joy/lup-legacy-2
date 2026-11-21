@@ -6,7 +6,8 @@ the repository's link at it in one rename (`Copies.switch`): the repository's
 command, found through the link, is always a whole copy, never one an install
 is still writing. The host service starts each repository's process from the
 copy the link names as it asks, and a process keeps the copy it started from
-(`host/workers.py`); a copy the link doesn't name, which no process runs and
+(`host/workers.py`), and a launch's room keeps the copy it was given
+(`RoomCopy`); a copy the link doesn't name, which no process or room runs and
 which isn't kept, is removed by the service's sweep (`removable`).
 
 On lup's own repository the copy is what the host service and the person's
@@ -318,7 +319,7 @@ class Copies(Model):
 
 
 def removable(judges: Path, running: list[Path]) -> list[Path]:
-    """List every repository's copies under `judges` to remove (`Copies.unused`), `running` being the commands of the processes that run one."""
+    """List every repository's copies under `judges` to remove (`Copies.unused`), `running` being the commands that run one: the repositories' processes', and those of each served launch's room."""
     homes = sorted(judges.iterdir()) if judges.is_dir() else []
     return [
         each

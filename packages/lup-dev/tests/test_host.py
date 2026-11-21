@@ -96,6 +96,7 @@ from lup_dev.host.workers import (
     Offered,
     RepositoryAsking,
 )
+from lup_dev.launch.room import RoomCopy
 from lup_dev.layout import CopyLayout, HostLayout, Layout
 from lup_dev.settings import LupDevSettings
 
@@ -2072,6 +2073,81 @@ def test_the_sweep_removes_the_copies_nothing_runs_and_none_judges(
             f"Removed {each.resolve()}, a copy of `lup-dev` nothing runs or judges "
             "with."
         ) in said
+
+
+def test_the_sweep_keeps_the_copy_a_served_launchs_room_runs_until_it_ends(
+    tmp_path_factory: pytest.TempPathFactory,
+    said: list[str],
+    tmp_path: Path,
+    clock: FakeClock,
+) -> None:
+    base = tmp_path_factory.mktemp("swept")
+    machine = Layout(state=base / "state", runtime=base / "run", data=base / "data")
+    own = client(machine.host, clock)
+    judging = Copies(layout=machine.judge(base / "repo.git"))
+    given = copy_of(judging, "given")
+    judging.switch(given)
+    RoomCopy(launch=machine.launch("live"), judging=given, name="lup-dev").write()
+    judging.switch(copy_of(judging, "approved-since"))
+    containers = Containers("lup-live")
+    pauses = Pauses()
+    sweeping = cli.Sweeping(
+        layout=machine,
+        host=own,
+        podman=Podman(execute=containers),
+        say=said.append,
+        running=list,
+        pause=pauses,
+    )
+    with served(service(machine.host, Judge(), said)):
+        own.register(launch(tmp_path, "live", "first"))
+    with served(service(machine.host, Judge(), said, companions=[sweeping])):
+        pauses.next()
+        kept = given.home.is_dir()
+        containers.running.remove("lup-live")
+        pauses.next()
+    assert kept, "no process runs it and it doesn't judge, but a served room has it"
+    assert not given.home.exists(), "removed once the launch ended"
+    assert (
+        f"Removed {given.home.resolve()}, a copy of `lup-dev` nothing runs or "
+        "judges with."
+    ) in said
+
+
+class Unlisting(HostClient):
+    """A client of a service that can't list its launches."""
+
+    @override
+    def launches(self) -> list[Register]:
+        message = "the service went away"
+        raise HostError(message)
+
+
+def test_where_the_launches_cant_be_listed_the_sweep_removes_no_copy(
+    tmp_path_factory: pytest.TempPathFactory, said: list[str], clock: FakeClock
+) -> None:
+    base = tmp_path_factory.mktemp("swept")
+    machine = Layout(state=base / "state", runtime=base / "run", data=base / "data")
+    judging = Copies(layout=machine.judge(base / "repo.git"))
+    replaced = copy_of(judging, "replaced")
+    judging.switch(replaced)
+    judging.switch(copy_of(judging, "current"))
+    sweeping = cli.Sweeping(
+        layout=machine,
+        host=Unlisting(layout=machine.host, clock=clock, starter=Recorded()),
+        podman=Podman(execute=Containers()),
+        say=said.append,
+        running=list,
+    )
+    asyncio.run(sweeping.pruned())
+    assert replaced.home.is_dir(), "a room may run it"
+    assert said == [
+        (
+            "The copies of `lup-dev` nothing runs weren't looked for, as the "
+            "launches, whose rooms may run one, couldn't be listed: the service "
+            "went away"
+        )
+    ]
 
 
 def test_what_a_conversation_is_doing_outlasts_a_restart_of_the_service(

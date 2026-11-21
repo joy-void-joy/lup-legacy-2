@@ -844,7 +844,8 @@ class RoomCopy(Model):
     launch: LaunchLayout
     judging: CopyLayout
     """The copy judging as the launch starts: one approved later reaches the
-    room at its next launch."""
+    room at its next launch, and this one is kept until the launch ends, as the
+    host's sweep follows each served launch's commands (`room_commands`)."""
     name: str
     """Its command, by its package's name: `lup-dev`."""
 
@@ -854,7 +855,7 @@ class RoomCopy(Model):
         return [Mount(source=self.judging.home, read_only=True)]
 
     def write(self) -> None:
-        """Link the command among the launch's own to the copy's."""
+        """Link the command among the launch's own to the copy's: before the launch registers, so the sweep never finds it served without its link."""
         self.launch.bin.mkdir(parents=True, exist_ok=True)
         command = self.launch.bin / self.name
         command.unlink(missing_ok=True)
@@ -882,6 +883,16 @@ def room_copy(tool: Tool, judge: JudgeLayout, launch: LaunchLayout) -> RoomCopy 
             )
         case _:
             return None
+
+
+def room_commands(launch: LaunchLayout) -> list[Path]:
+    """List the commands among `launch`'s own, their links followed: what the room runs of the host's, the copy of `lup-dev` it was given (`RoomCopy`) among them.
+
+    The room mounts them read-only, so each link is one the host wrote.
+    """
+    if not launch.bin.is_dir():
+        return []
+    return [each.resolve() for each in sorted(launch.bin.iterdir())]
 
 
 class RoomPackageAge(Model):
