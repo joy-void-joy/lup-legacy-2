@@ -9,7 +9,7 @@ worktree launched, come the library's `TerminalSettings` (`terminal_settings`):
   room's pipe to the host service (`piped`), and waiting as long as a hold may;
 - lup's tool server, on the launch's `mcp.sock` in the room, which the host
   service serves (`served`; `docs/host.md`, *How a room reaches it*), a call to it
-  waiting as long as a hold may;
+  waiting as long as the operator takes, up to the most a runtime accepts;
 - the session's own messaging socket, put in the launch's socket directory, so
   the host service reaches it to start a turn of the idle session where their
   runtime has one (`docs/inbox.md`, *How an agent is told*);
@@ -268,12 +268,17 @@ def hooked(
     return spelled(partial(piped, timeout=hold), hold)
 
 
-def served(hold: timedelta = timedelta(hours=25)) -> list[ToolServer]:
+def served(hold: timedelta = timedelta(days=24)) -> list[ToolServer]:
     """Return the tool servers a launched session loads: lup's, on the launch's `mcp.sock` in the room.
 
-    A call to it may wait for the operator, so the runtime waits on one as long as
-    the hook does: `hold`, above a hold's day. It pushes what waits for an idle
-    session, starting their turn, where the runtime takes a push.
+    A call to it may wait for the operator, so the runtime waits on one for
+    `hold`: `land`, `wait_inbox` and `ask` with `wait` wait on the operator,
+    who may be away for days, and the host service may go on waiting once the
+    runtime gives up, so a `land` the runtime ended first can land unseen. 24
+    days is under the most a runtime accepts (`docs/inbox.md`, *Holding a
+    call*). The hooks keep a hold's day (`hooked`), since a held write is put
+    back after it (`Holds.patience`). It pushes what waits for an idle session,
+    starting their turn, where the runtime takes a push.
     """
     socket = LaunchSockets(directory=RoomPaths().sockets).mcp
     return [ToolServer(name=SERVER, socket=socket, timeout=hold, pushes=True)]
