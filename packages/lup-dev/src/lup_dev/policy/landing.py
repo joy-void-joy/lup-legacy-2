@@ -1598,11 +1598,24 @@ class Lander(Model, arbitrary_types_allowed=True):
             self.launch,
         )
         [update] = reply.updates
+        alongside: list[str] = []
         if update.error is not None:
-            kept = " What the operator approved stays approved." if holds else ""
-            refusals = f"\n{reply.said}" if reply.said else ""
-            moved = [] if made.moved is None else [made.moved]
-            return "\n".join([f"Not landed: {update.error}.{kept}{refusals}", *moved])
+            after = await self.after_refused(remote, onto, lands)
+            if after is None:
+                kept = " What the operator approved stays approved." if holds else ""
+                refusals = f"\n{reply.said}" if reply.said else ""
+                moved = [] if made.moved is None else [made.moved]
+                return "\n".join(
+                    [f"Not landed: {update.error}.{kept}{refusals}", *moved]
+                )
+            refs = after
+            alongside = [
+                (
+                    f"`{remote}` refused this push ({update.error}), as "
+                    f"`{short(onto)}` there was at {lands} already: another call of "
+                    "`land` pushed the same commit at the same time."
+                )
+            ]
         untracked = await threaded(
             self.launch.repository, tracked, git, remote, onto, lands
         )
@@ -1626,6 +1639,7 @@ class Lander(Model, arbitrary_types_allowed=True):
             [
                 *made.said,
                 f"Landed {lands} on `{short(onto)}` at `{remote}`, {was}.",
+                *alongside,
                 *untracked,
                 *approvals(waited),
                 *deferrals,
@@ -1635,6 +1649,26 @@ class Lander(Model, arbitrary_types_allowed=True):
                 *going,
             ]
         )
+
+    async def after_refused(
+        self, remote: str, onto: str, lands: str
+    ) -> list[Ref] | None:
+        """Return `remote`'s refs where it refused a push of `lands` to `onto` that `onto` there names already; none where it doesn't, or they can't be listed.
+
+        Two calls of `land` can push the same commit at once: a call the runtime
+        gave up on goes on waiting on the host, and the operator's one answer
+        releases it and its retry together, the retry having found the same
+        holds (`docs/inbox.md`, *Holding a call*). The remote takes one push and
+        refuses the other, `cannot lock ref`, though what it was to land has
+        landed. The refs, listed after, are the ones the cleanup reads, so it
+        doesn't delete a branch the other call deleted.
+        """
+        try:
+            after = await self.remotes.listed(self.launch, remote, push=True)
+        except HostError:
+            return None
+        there = next((ref.object for ref in after if ref.name == onto), None)
+        return after if there == lands else None
 
     async def hosting(
         self, git: Git, old: str | None, tip: str, onto: str, source: str
